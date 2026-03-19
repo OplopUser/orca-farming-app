@@ -1,0 +1,31 @@
+{
+  "name": "orca-sol-usdc-rebalancer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20.11.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "run": "tsx src/index.ts run",
+    "dry-run": "tsx src/index.ts dry-run",
+    "rebalance-now": "tsx src/index.ts rebalance-now",
+    "ui": "tsx src/controlPanel.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@orca-so/whirlpools": "7.0.1",
+    "@solana/kit": "5.5.1",
+    "dotenv": "17.3.1",
+    "pino": "10.3.1",
+    "zod": "4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "25.5.0",
+    "tsx": "4.21.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.0"
+  }
+}

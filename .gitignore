@@ -1,0 +1,9 @@
+node_modules
+dist
+.env
+data
+coverage
+*.log
+.DS_Store
+wallet.json
+*keypair*.json
