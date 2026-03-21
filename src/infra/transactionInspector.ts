@@ -9,6 +9,10 @@ export interface TransactionSummary {
   error: unknown;
 }
 
+export interface OwnerTokenDebitSummary {
+  tokenDebits: Record<string, bigint>;
+}
+
 interface RpcResponse<T> {
   result?: T;
   error?: { message: string };
@@ -20,8 +24,67 @@ interface TransactionMetaResponse {
     fee?: number;
     err?: unknown;
     computeUnitsConsumed?: number;
+    preTokenBalances?: TokenBalanceEntry[] | null;
+    postTokenBalances?: TokenBalanceEntry[] | null;
   } | null;
   confirmationStatus?: string | null;
+}
+
+interface TokenBalanceEntry {
+  accountIndex?: number;
+  mint?: string;
+  owner?: string;
+  uiTokenAmount?: {
+    amount?: string;
+  } | null;
+}
+
+export function extractOwnerTokenDebits(
+  preTokenBalances: TokenBalanceEntry[] | null | undefined,
+  postTokenBalances: TokenBalanceEntry[] | null | undefined,
+  ownerAddress: string,
+  mints: string[]
+): OwnerTokenDebitSummary | null {
+  const targetMints = new Set(mints);
+  const balances = new Map<string, { pre: bigint; post: bigint }>();
+
+  const accumulate = (
+    entries: TokenBalanceEntry[] | null | undefined,
+    phase: "pre" | "post"
+  ) => {
+    for (const entry of entries ?? []) {
+      if (entry.owner !== ownerAddress || !entry.mint || !targetMints.has(entry.mint)) {
+        continue;
+      }
+
+      const amount = entry.uiTokenAmount?.amount;
+      if (!amount) {
+        continue;
+      }
+
+      const current = balances.get(entry.mint) ?? { pre: 0n, post: 0n };
+      current[phase] += BigInt(amount);
+      balances.set(entry.mint, current);
+    }
+  };
+
+  accumulate(preTokenBalances, "pre");
+  accumulate(postTokenBalances, "post");
+
+  const tokenDebits: Record<string, bigint> = {};
+  for (const mint of mints) {
+    const balance = balances.get(mint);
+    if (!balance) {
+      continue;
+    }
+
+    const debit = balance.pre > balance.post ? balance.pre - balance.post : 0n;
+    if (debit > 0n) {
+      tokenDebits[mint] = debit;
+    }
+  }
+
+  return Object.keys(tokenDebits).length ? { tokenDebits } : null;
 }
 
 export class TransactionInspector {
@@ -33,6 +96,40 @@ export class TransactionInspector {
   }
 
   async inspect(signature: string): Promise<TransactionSummary | null> {
+    const transaction = await this.fetchTransaction(signature);
+    if (!transaction) {
+      return null;
+    }
+
+    return {
+      signature,
+      slot: transaction.slot ?? null,
+      feeLamports: transaction.meta?.fee ?? null,
+      computeUnitsConsumed: transaction.meta?.computeUnitsConsumed ?? null,
+      confirmationStatus: transaction.confirmationStatus ?? null,
+      error: transaction.meta?.err ?? null
+    };
+  }
+
+  async inspectOwnerTokenDebits(
+    signature: string,
+    ownerAddress: string,
+    mints: string[]
+  ): Promise<OwnerTokenDebitSummary | null> {
+    const transaction = await this.fetchTransaction(signature);
+    if (!transaction?.meta) {
+      return null;
+    }
+
+    return extractOwnerTokenDebits(
+      transaction.meta.preTokenBalances,
+      transaction.meta.postTokenBalances,
+      ownerAddress,
+      mints
+    );
+  }
+
+  private async fetchTransaction(signature: string): Promise<TransactionMetaResponse | null> {
     let lastError: Error | null = null;
 
     for (let attempt = 0; attempt < this.rpcUrls.length; attempt += 1) {
@@ -52,7 +149,8 @@ export class TransactionInspector {
               signature,
               {
                 commitment: "confirmed",
-                maxSupportedTransactionVersion: 0
+                maxSupportedTransactionVersion: 0,
+                encoding: "jsonParsed"
               }
             ]
           })
@@ -81,14 +179,7 @@ export class TransactionInspector {
           return null;
         }
 
-        return {
-          signature,
-          slot: body.result.slot ?? null,
-          feeLamports: body.result.meta?.fee ?? null,
-          computeUnitsConsumed: body.result.meta?.computeUnitsConsumed ?? null,
-          confirmationStatus: body.result.confirmationStatus ?? null,
-          error: body.result.meta?.err ?? null
-        };
+        return body.result;
       } catch (error) {
         if (isRecoverableRpcError(error) && attempt < this.rpcUrls.length - 1) {
           lastError = error as Error;

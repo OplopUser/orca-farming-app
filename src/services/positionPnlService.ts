@@ -27,12 +27,18 @@ type TokenPriceResolver = (
   currentPrice: number
 ) => Promise<TokenPricesUsdc | null>;
 
+type OpenTransactionDebitResolver = (
+  bot: BotDefinition,
+  openTxId: string
+) => Promise<{ tokenA: bigint; tokenB: bigint } | null>;
+
 export class PositionPnlService {
   constructor(
     private readonly ledgerStore: PnlLedgerStore,
     private readonly logger: Logger,
     private readonly resolveTokenPrices: TokenPriceResolver = async (bot, bots, currentPrice) =>
-      resolveTokenPricesUsdc(bot, currentPrice, bots)
+      resolveTokenPricesUsdc(bot, currentPrice, bots),
+    private readonly resolveOpenTransactionDebits?: OpenTransactionDebitResolver
   ) {}
 
   async recordPositionOpened(bot: BotDefinition, bots: BotRecord[], input: PositionLedgerOpenInput) {
@@ -138,6 +144,7 @@ export class PositionPnlService {
     }
 
     this.repairQuoteNativeUsdRecord(record, input.exitGrossQuote, prices);
+    this.repairCorruptedClosedBasis(record, input, exitGrossValueUsdc);
 
     record.status = "closed";
     record.closedAt = input.closedAt;
@@ -156,6 +163,28 @@ export class PositionPnlService {
     record.closeTxId = input.closeTxId;
 
     await this.ledgerStore.saveRecord(record);
+  }
+
+  private repairCorruptedClosedBasis(
+    record: PositionPnlRecord,
+    input: PositionLedgerCloseInput,
+    exitGrossValueUsdc: number
+  ) {
+    const entryTokenA = this.parseBigInt(record.entryTokenA);
+    const entryTokenB = this.parseBigInt(record.entryTokenB);
+    const oneSidedEntry = (entryTokenA <= 0n && entryTokenB > 0n) || (entryTokenB <= 0n && entryTokenA > 0n);
+    const distortedBasis =
+      !Number.isFinite(record.entryCapitalUsdc) ||
+      record.entryCapitalUsdc <= 0 ||
+      Math.abs(record.entryCapitalUsdc - exitGrossValueUsdc) / exitGrossValueUsdc > 0.25;
+
+    if (!oneSidedEntry || !distortedBasis) {
+      return;
+    }
+
+    record.entryCapitalUsdc = exitGrossValueUsdc;
+    record.entryTokenA = input.exitTokenA;
+    record.entryTokenB = input.exitTokenB;
   }
 
   async markOpenPosition(bot: BotDefinition, bots: BotRecord[], client: OrcaClient, input: PositionLedgerMarkInput) {
@@ -208,8 +237,11 @@ export class PositionPnlService {
     }
 
     this.repairQuoteNativeUsdRecord(record, input.grossValueQuote, prices);
+    await this.repairOpenTransactionBasis(record, bot, prices);
+    this.repairInconsistentOpenBasis(record, bot, prices);
 
     const latestGrossValueUsdc = input.grossValueQuote * prices.tokenBUsdc;
+    this.repairCorruptedOpenBasis(record, input, latestGrossValueUsdc);
     if (
       record.bootstrapped &&
       !record.openTxId &&
@@ -234,6 +266,86 @@ export class PositionPnlService {
     record.lastMarkedAt = input.markedAt;
 
     await this.ledgerStore.saveRecord(record);
+  }
+
+  private repairCorruptedOpenBasis(
+    record: PositionPnlRecord,
+    input: PositionLedgerMarkInput,
+    latestGrossValueUsdc: number
+  ) {
+    if (record.status !== "open" || !Number.isFinite(latestGrossValueUsdc) || latestGrossValueUsdc <= 0) {
+      return;
+    }
+
+    const entryTokenA = this.parseBigInt(record.entryTokenA);
+    const entryTokenB = this.parseBigInt(record.entryTokenB);
+    const oneSidedEntry = (entryTokenA <= 0n && entryTokenB > 0n) || (entryTokenB <= 0n && entryTokenA > 0n);
+    const distortedBasis =
+      !Number.isFinite(record.entryCapitalUsdc) ||
+      record.entryCapitalUsdc <= 0 ||
+      Math.abs(record.entryCapitalUsdc - latestGrossValueUsdc) / latestGrossValueUsdc > 0.25;
+
+    if (!oneSidedEntry || !distortedBasis) {
+      return;
+    }
+
+    record.entryCapitalUsdc = latestGrossValueUsdc;
+    record.entryTokenA = input.grossTokenA;
+    record.entryTokenB = input.grossTokenB;
+  }
+
+  private async repairOpenTransactionBasis(
+    record: PositionPnlRecord,
+    bot: BotDefinition,
+    prices: TokenPricesUsdc
+  ) {
+    if (record.status !== "open" || !record.openTxId || !this.resolveOpenTransactionDebits) {
+      return;
+    }
+
+    try {
+      const debits = await this.resolveOpenTransactionDebits(bot, record.openTxId);
+      if (!debits || debits.tokenA <= 0n || debits.tokenB <= 0n) {
+        return;
+      }
+
+      const expectedEntryCapitalUsdc = quoteValueFromRaw(
+        record.entryCenterPrice,
+        debits.tokenA,
+        debits.tokenB,
+        bot.tokenADecimals,
+        bot.tokenBDecimals
+      ) * prices.tokenBUsdc;
+
+      if (!Number.isFinite(expectedEntryCapitalUsdc) || expectedEntryCapitalUsdc <= 0) {
+        return;
+      }
+
+      const recordedTokenA = this.parseBigInt(record.entryTokenA);
+      const recordedTokenB = this.parseBigInt(record.entryTokenB);
+      const tokenMismatch =
+        recordedTokenA !== debits.tokenA ||
+        recordedTokenB !== debits.tokenB;
+      const basisDelta = Math.abs(record.entryCapitalUsdc - expectedEntryCapitalUsdc) / expectedEntryCapitalUsdc;
+
+      if (!tokenMismatch && basisDelta <= 0.01) {
+        return;
+      }
+
+      record.entryTokenA = debits.tokenA.toString();
+      record.entryTokenB = debits.tokenB.toString();
+      record.entryCapitalUsdc = expectedEntryCapitalUsdc;
+    } catch (error) {
+      this.logger.warn(
+        {
+          botId: bot.id,
+          positionMint: record.positionMint,
+          openTxId: record.openTxId,
+          error: (error as Error).message
+        },
+        "open transaction basis repair failed"
+      );
+    }
   }
 
   private repairQuoteNativeUsdRecord(
@@ -283,6 +395,56 @@ export class PositionPnlService {
         record.cumulativeSwapFeesUsdc,
         record.cumulativeTxFeesUsdc
       );
+    }
+  }
+
+  private repairInconsistentOpenBasis(
+    record: PositionPnlRecord,
+    bot: BotDefinition,
+    prices: TokenPricesUsdc
+  ) {
+    if (record.status !== "open" || !Number.isFinite(record.entryCenterPrice) || record.entryCenterPrice <= 0) {
+      return;
+    }
+
+    let entryTokenA: bigint;
+    let entryTokenB: bigint;
+    try {
+      entryTokenA = BigInt(record.entryTokenA);
+      entryTokenB = BigInt(record.entryTokenB);
+    } catch {
+      return;
+    }
+
+    if (entryTokenA <= 0n && entryTokenB <= 0n) {
+      return;
+    }
+
+    const expectedEntryCapitalUsdc = quoteValueFromRaw(
+      record.entryCenterPrice,
+      entryTokenA,
+      entryTokenB,
+      bot.tokenADecimals,
+      bot.tokenBDecimals
+    ) * prices.tokenBUsdc;
+
+    if (!Number.isFinite(expectedEntryCapitalUsdc) || expectedEntryCapitalUsdc <= 0) {
+      return;
+    }
+
+    const basisDelta = Math.abs(record.entryCapitalUsdc - expectedEntryCapitalUsdc) / expectedEntryCapitalUsdc;
+    if (basisDelta <= 0.5) {
+      return;
+    }
+
+    record.entryCapitalUsdc = expectedEntryCapitalUsdc;
+  }
+
+  private parseBigInt(value: string) {
+    try {
+      return BigInt(value);
+    } catch {
+      return 0n;
     }
   }
 

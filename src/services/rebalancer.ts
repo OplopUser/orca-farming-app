@@ -198,7 +198,7 @@ export class RebalancerService {
     ) {
       try {
         const markQuote = await this.orcaClient.closePosition(state.activePositionMint, false, 0);
-        const { grossValueQuote, feesEarnedQuote } = describeCloseQuote(
+        const markSummary = describeCloseQuote(
           pool.currentPrice,
           markQuote.quote,
           this.config.TOKEN_A_DECIMALS,
@@ -209,8 +209,10 @@ export class RebalancerService {
           positionMint: state.activePositionMint,
           markedAt: state.lastCycleAt,
           centerPrice: pool.currentPrice,
-          grossValueQuote,
-          feesEarnedQuote
+          grossValueQuote: markSummary.grossValueQuote,
+          feesEarnedQuote: markSummary.feesEarnedQuote,
+          grossTokenA: markSummary.grossTokenA.toString(),
+          grossTokenB: markSummary.grossTokenB.toString()
         });
         state.lastPnlMarkAt = state.lastCycleAt;
       } catch (error) {
@@ -532,7 +534,7 @@ export class RebalancerService {
       const closeResult = await this.closeManagedPosition(pending.previousPositionMint, true);
       pending.lastKnownCloseTxId = closeResult.txId;
       const closeSummary = await this.inspectTransaction(closeResult.txId);
-      const { grossValueQuote, feesEarnedQuote } = describeCloseQuote(
+      const closeMarkSummary = describeCloseQuote(
         pending.targetCenterPrice,
         closeResult.quote,
         this.config.TOKEN_A_DECIMALS,
@@ -557,8 +559,10 @@ export class RebalancerService {
             positionMint: pending.previousPositionMint,
             closedAt: new Date().toISOString(),
             centerPrice: pending.targetCenterPrice,
-            exitGrossQuote: grossValueQuote,
-            feesEarnedQuote,
+            exitGrossQuote: closeMarkSummary.grossValueQuote,
+            feesEarnedQuote: closeMarkSummary.feesEarnedQuote,
+            exitTokenA: closeMarkSummary.grossTokenA.toString(),
+            exitTokenB: closeMarkSummary.grossTokenB.toString(),
             closeTxId: closeResult.txId,
             closeTxFeeLamports: closeSummary?.feeLamports ?? 0
           });
@@ -732,6 +736,7 @@ export class RebalancerService {
       pending.plannedPositionMint = openResult.positionMint;
       pending.lastKnownOpenTxId = openResult.txId;
       const openSummary = await this.inspectTransaction(openResult.txId);
+      const postOpenBalances = await this.waitForPostOpenBalances(balances);
       let openedGrossValueQuote = this.quoteValue(
         pending.targetCenterPrice,
         openResult.deployableTokenA,
@@ -739,8 +744,20 @@ export class RebalancerService {
       );
       let openedGrossTokenA = openResult.deployableTokenA;
       let openedGrossTokenB = openResult.deployableTokenB;
+      let residualTokenA = postOpenBalances.tokenA;
+      let residualTokenB = postOpenBalances.tokenB;
+      const spentTokenA = this.nonNegativeBigInt(balances.tokenA - postOpenBalances.tokenA);
+      const spentTokenB = this.nonNegativeBigInt(balances.tokenB - postOpenBalances.tokenB);
 
-      if (openResult.positionMint) {
+      if (spentTokenA > 0n || spentTokenB > 0n) {
+        openedGrossTokenA = spentTokenA;
+        openedGrossTokenB = spentTokenB;
+        openedGrossValueQuote = this.quoteValue(
+          pending.targetCenterPrice,
+          openedGrossTokenA,
+          openedGrossTokenB
+        );
+      } else if (openResult.positionMint) {
         try {
           const openMarkQuote = await this.orcaClient.closePosition(openResult.positionMint, false, 0);
           const openMarkSummary = describeCloseQuote(
@@ -778,8 +795,8 @@ export class RebalancerService {
             entryCapitalQuote: openedGrossValueQuote,
             entryTokenA: openedGrossTokenA.toString(),
             entryTokenB: openedGrossTokenB.toString(),
-            residualTokenA: this.nonNegativeBigInt(balances.tokenA - openResult.deployableTokenA).toString(),
-            residualTokenB: this.nonNegativeBigInt(balances.tokenB - openResult.deployableTokenB).toString(),
+            residualTokenA: residualTokenA.toString(),
+            residualTokenB: residualTokenB.toString(),
             cumulativeSwapFeeQuote: pending.cumulativeSwapFeeQuote,
             cumulativeTxFeeLamports: pending.cumulativeTxFeeLamports + (openSummary?.feeLamports ?? 0),
             openTxId: openResult.txId
@@ -1711,6 +1728,22 @@ export class RebalancerService {
     await this.sleep(3_000);
 
     return this.accountReader.getWalletBalances(owner, this.config.TOKEN_A_MINT, this.config.TOKEN_B_MINT);
+  }
+
+  private async waitForPostOpenBalances(preOpenBalances: WalletBalances) {
+    await this.sleep(1_500);
+    let balances = await this.orcaClient.getWalletBalances();
+    const observedSpend =
+      balances.tokenA < preOpenBalances.tokenA ||
+      balances.tokenB < preOpenBalances.tokenB;
+
+    if (observedSpend) {
+      return balances;
+    }
+
+    await this.sleep(2_000);
+    balances = await this.orcaClient.getWalletBalances();
+    return balances;
   }
 
   private quoteValue(currentPrice: number, tokenA: bigint, tokenB: bigint) {

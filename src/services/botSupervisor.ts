@@ -16,6 +16,7 @@ import type {
 } from "../domain.js";
 import { RpcAccountReader } from "../infra/rpcAccountReader.js";
 import { isRecoverableRpcError } from "../infra/rpcFailover.js";
+import { TransactionInspector } from "../infra/transactionInspector.js";
 import { OrcaClient } from "../clients/orcaClient.js";
 import { RebalancerService } from "./rebalancer.js";
 import { PositionPnlService } from "./positionPnlService.js";
@@ -41,6 +42,7 @@ export class BotSupervisor {
   private static readonly USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
   private readonly runners = new Map<BotId, BotRunner>();
   private readonly accountReader: RpcAccountReader;
+  private readonly transactionInspector: TransactionInspector;
   private readonly sharedClient: OrcaClient;
   private readonly pnlService: PositionPnlService;
   private readonly queue: ExecutionQueueJob[] = [];
@@ -53,6 +55,7 @@ export class BotSupervisor {
     private readonly registryStore: BotRegistryStore
   ) {
     this.accountReader = new RpcAccountReader(config.solanaRpcUrls);
+    this.transactionInspector = new TransactionInspector(config.solanaRpcUrls);
     this.sharedClient = new OrcaClient(config);
     this.pnlService = new PositionPnlService(
       new PnlLedgerStore(config.BOT_PNL_LEDGER_FILE),
@@ -60,7 +63,23 @@ export class BotSupervisor {
       async (bot, bots, currentPrice) =>
         resolveTokenPricesUsdcStrict(bot, currentPrice, bots) ??
         await this.resolveTokenPricesUsdcWithLiveReference(bot, currentPrice, bots) ??
-        resolveTokenPricesUsdc(bot, currentPrice, bots)
+        resolveTokenPricesUsdc(bot, currentPrice, bots),
+      async (bot, openTxId) => {
+        const ownerAddress = this.sharedClient.getOwnerAddress();
+        const debits = await this.transactionInspector.inspectOwnerTokenDebits(
+          openTxId,
+          ownerAddress,
+          [bot.tokenAMint, bot.tokenBMint]
+        );
+        if (!debits) {
+          return null;
+        }
+
+        return {
+          tokenA: debits.tokenDebits[bot.tokenAMint] ?? 0n,
+          tokenB: debits.tokenDebits[bot.tokenBMint] ?? 0n
+        };
+      }
     );
   }
 

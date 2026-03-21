@@ -239,7 +239,8 @@ function createHarness(initialState: BotState, overrides: Record<string, unknown
     }))
   };
   (service as any).transactionInspector = {
-    inspect: vi.fn(async () => null)
+    inspect: vi.fn(async () => null),
+    inspectOwnerTokenDebits: vi.fn(async () => null)
   };
 
   return {

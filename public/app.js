@@ -355,6 +355,14 @@ function computePositionPnl(record) {
   return record.latestGrossValueUsdc - record.entryCapitalUsdc;
 }
 
+function computePrincipalBalance(record) {
+  if (!record || record.latestGrossValueUsdc == null) {
+    return null;
+  }
+
+  return record.latestGrossValueUsdc - (record.feesEarnedUsdc ?? 0);
+}
+
 function rangeBarHtml(record) {
   const lower = record.entryLowerPrice;
   const upper = record.entryUpperPrice;
@@ -437,6 +445,7 @@ function renderActiveLpPositions(records) {
       const yieldPct = ledgerRecord ? computeYieldPct(ledgerRecord) : null;
       const apr = ledgerRecord ? computeAnnualisedApr(ledgerRecord) : null;
       const positionPnl = ledgerRecord ? computePositionPnl(ledgerRecord) : null;
+      const principalBalance = ledgerRecord ? computePrincipalBalance(ledgerRecord) : null;
       const totalCosts = ledgerRecord
         ? (ledgerRecord.cumulativeSwapFeesUsdc ?? 0) + (ledgerRecord.cumulativeTxFeesUsdc ?? 0)
         : null;
@@ -456,7 +465,7 @@ function renderActiveLpPositions(records) {
           </div>
           <dl class="lp-yield-row">
             <div>
-              <dt>Fees Earned</dt>
+              <dt>Pending Yield</dt>
               <dd class="${pnlClass(ledgerRecord?.feesEarnedUsdc)}">${formatUsdPrecise(ledgerRecord?.feesEarnedUsdc)}</dd>
             </div>
             <div>
@@ -479,11 +488,11 @@ function renderActiveLpPositions(records) {
               <dd>${formatUsd(ledgerRecord?.entryCapitalUsdc)}</dd>
             </div>
             <div>
-              <dt>Current Value</dt>
-              <dd>${formatUsd(ledgerRecord?.latestGrossValueUsdc)}</dd>
+              <dt>Balance</dt>
+              <dd>${formatUsd(principalBalance)}</dd>
             </div>
             <div>
-              <dt>Position PnL</dt>
+              <dt>Total PnL</dt>
               <dd class="${pnlClass(positionPnl)}">${formatUsdPrecise(positionPnl)}</dd>
             </div>
             <div>

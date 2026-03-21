@@ -198,6 +198,8 @@ export interface PositionLedgerCloseInput {
   centerPrice: number;
   exitGrossQuote: number;
   feesEarnedQuote: number;
+  exitTokenA: string;
+  exitTokenB: string;
   closeTxId: string | null;
   closeTxFeeLamports: number;
 }
@@ -209,6 +211,8 @@ export interface PositionLedgerMarkInput {
   centerPrice: number;
   grossValueQuote: number;
   feesEarnedQuote: number;
+  grossTokenA: string;
+  grossTokenB: string;
 }
 
 export interface PositionPnlRecord {
