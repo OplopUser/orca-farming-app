@@ -13,6 +13,7 @@
  */
 
 import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 
 import BN from "bn.js";
 import {
@@ -22,8 +23,13 @@ import {
   sendAndConfirmTransaction,
   VersionedTransaction
 } from "@solana/web3.js";
-import DLMM from "@meteora-ag/dlmm";
-import { StrategyType } from "@meteora-ag/dlmm";
+
+// Force CJS build of @meteora-ag/dlmm to avoid ESM source-file interop issues
+const _require = createRequire(import.meta.url);
+const _dlmmModule = _require("@meteora-ag/dlmm") as { StrategyType: Record<string, number> };
+// The CJS export is the DLMM class itself; StrategyType is a property on it
+const DLMM = _dlmmModule as unknown as { create: (connection: Connection, poolAddress: PublicKey) => Promise<any>; [key: string]: unknown };
+const StrategyType = (_dlmmModule as any).StrategyType as { Spot: number; Curve: number; BidAsk: number };
 
 import type { AppConfig } from "../config.js";
 import {
@@ -96,7 +102,7 @@ export class MeteoraClient implements PlatformClient {
     this.walletAddress = this.keypair.publicKey.toBase58();
 
     const poolPublicKey = new PublicKey(this.config.ORCA_WHIRLPOOL_ADDRESS);
-    this.pool = await (DLMM as any).create(this.connection, poolPublicKey);
+    this.pool = await DLMM.create(this.connection, poolPublicKey);
   }
 
   getOwnerAddress(): string {
@@ -132,7 +138,7 @@ export class MeteoraClient implements PlatformClient {
 
   async discoverPoolMetadata(poolAddress: string): Promise<PoolMetadata> {
     const connection = new Connection(this.config.solanaRpcUrls[0]!, "confirmed");
-    const pool = await (DLMM as any).create(connection, new PublicKey(poolAddress));
+    const pool = await DLMM.create(connection, new PublicKey(poolAddress));
 
     const tokenXMint = pool.tokenX.mint.address.toBase58();
     const tokenYMint = pool.tokenY.mint.address.toBase58();
@@ -553,7 +559,7 @@ export class MeteoraClient implements PlatformClient {
     };
   }
 
-  private resolveStrategyType(type: string): StrategyType {
+  private resolveStrategyType(type: string): number {
     switch (type) {
       case "Curve": return StrategyType.Curve;
       case "BidAsk": return StrategyType.BidAsk;
