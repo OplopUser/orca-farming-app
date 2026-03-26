@@ -466,7 +466,11 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, url
 }
 
 async function main() {
-  await supervisor.init();
+  // Attempt early init but don't block server startup on RPC/wallet errors.
+  // The supervisor will retry init() on the first API request.
+  supervisor.init().catch((err) => {
+    logger.warn({ error: (err as Error).message }, "supervisor pre-init failed; will retry on first request");
+  });
 
   const server = createServer(async (request, response) => {
     try {
