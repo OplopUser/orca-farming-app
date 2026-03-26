@@ -482,7 +482,9 @@ async function main() {
 
       await serveStatic(url.pathname, response);
     } catch (error) {
-      sendError(response, 500, (error as Error).message);
+      const err = error as Error;
+      logger.error({ error: err.message, stack: err.stack }, "api error");
+      sendError(response, 500, err.message);
     }
   });
 

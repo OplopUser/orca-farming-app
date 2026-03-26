@@ -140,11 +140,15 @@ export class MeteoraClient implements PlatformClient {
     const connection = new Connection(this.config.solanaRpcUrls[0]!, "confirmed");
     const pool = await DLMM.create(connection, new PublicKey(poolAddress));
 
-    const tokenXMint = pool.tokenX.mint.address.toBase58();
-    const tokenYMint = pool.tokenY.mint.address.toBase58();
-    const tokenXDecimals = pool.tokenX.mint.decimals;
-    const tokenYDecimals = pool.tokenY.mint.decimals;
-    const binStep = pool.lbPair.binStep;
+    // tokenX.publicKey is the mint address (same as mint.address, but direct)
+    const tokenXMint = (pool.tokenX.publicKey ?? pool.tokenX.mint?.address)?.toBase58();
+    const tokenYMint = (pool.tokenY.publicKey ?? pool.tokenY.mint?.address)?.toBase58();
+    if (!tokenXMint || !tokenYMint) {
+      throw new Error(`Could not resolve token mints for Meteora pool ${poolAddress}`);
+    }
+    const tokenXDecimals = pool.tokenX.mint?.decimals ?? 9;
+    const tokenYDecimals = pool.tokenY.mint?.decimals ?? 6;
+    const binStep = typeof pool.lbPair.binStep === "number" ? pool.lbPair.binStep : Number(pool.lbPair.binStep);
 
     return {
       whirlpoolAddress: poolAddress,
