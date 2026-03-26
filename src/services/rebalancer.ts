@@ -26,7 +26,8 @@ import {
 } from "./recovery.js";
 import { computeBand, computeTargetValueWeights, evaluateDriftTrigger, fromBaseUnits, toBaseUnits } from "../strategy/bands.js";
 import { describeCloseQuote } from "./positionPnlService.js";
-import { InsufficientAllocationError, OrcaClient } from "../clients/orcaClient.js";
+import { InsufficientAllocationError } from "../clients/orcaClient.js";
+import type { PlatformClient } from "../clients/platformClient.js";
 
 export type RunMode = "run" | "dry-run" | "rebalance-now";
 
@@ -80,7 +81,7 @@ export class RebalancerService {
     private readonly config: AppConfig,
     private readonly logger: Logger,
     private readonly stateStore: RuntimeStateStore,
-    private readonly orcaClient: OrcaClient,
+    private readonly client: PlatformClient,
     private readonly options: RebalancerOptions = {}
   ) {
     this.accountReader = new RpcAccountReader(config.solanaRpcUrls);
@@ -99,7 +100,7 @@ export class RebalancerService {
   }
 
   async runCycle(mode: RunMode): Promise<void> {
-    this.orcaClient.clearPositionCache();
+    this.client.clearPositionCache();
     const state = await this.stateStore.load();
     if (state.pendingRebalance) {
       this.normalizePendingRebalance(state.pendingRebalance);
@@ -131,13 +132,13 @@ export class RebalancerService {
       return;
     }
 
-    const pool = await this.orcaClient.fetchPoolSnapshot();
+    const pool = await this.client.fetchPoolSnapshot();
     state.lastObservedPrice = pool.currentPrice;
     state.lastOraclePrice = null;
     state.lastOracleAt = null;
 
     if (state.activePositionMint) {
-      const livePosition = await this.orcaClient.findManagedPosition(state.activePositionMint);
+      const livePosition = await this.client.findManagedPosition(state.activePositionMint);
       if (!livePosition) {
         this.logger.warn(
           {
@@ -197,7 +198,7 @@ export class RebalancerService {
       (!state.lastPnlMarkAt || Date.now() - Date.parse(state.lastPnlMarkAt) >= RebalancerService.PNL_MARK_INTERVAL_MS)
     ) {
       try {
-        const markQuote = await this.orcaClient.closePosition(state.activePositionMint, false, 0);
+        const markQuote = await this.client.closePosition(state.activePositionMint, false, 0);
         const markSummary = describeCloseQuote(
           pool.currentPrice,
           markQuote.quote,
@@ -269,7 +270,7 @@ export class RebalancerService {
     }
 
     const existingPosition = state.activePositionMint
-      ? await this.orcaClient.findManagedPosition(state.activePositionMint)
+      ? await this.client.findManagedPosition(state.activePositionMint)
       : null;
 
     state.pendingRebalance = {
@@ -333,9 +334,9 @@ export class RebalancerService {
 
   private async executeDryRunRebalance(state: BotRuntimeState, currentPrice: number) {
     const existingPosition = state.activePositionMint
-      ? await this.orcaClient.findManagedPosition(state.activePositionMint)
+      ? await this.client.findManagedPosition(state.activePositionMint)
       : null;
-    let balances = await this.orcaClient.getWalletBalances();
+    let balances = await this.client.getWalletBalances();
     let closeTxId: string | null = null;
     let swapTxId: string | null = null;
     let openTxId: string | null = null;
@@ -356,15 +357,16 @@ export class RebalancerService {
         "position close evaluated"
       );
 
+      const closeQuote = closeResult.quote as any;
       balances = {
-        tokenA: balances.tokenA + BigInt(closeResult.quote?.quote?.tokenMinA ?? 0),
-        tokenB: balances.tokenB + BigInt(closeResult.quote?.quote?.tokenMinB ?? 0)
+        tokenA: balances.tokenA + BigInt(closeQuote?.quote?.tokenMinA ?? 0),
+        tokenB: balances.tokenB + BigInt(closeQuote?.quote?.tokenMinB ?? 0)
       };
     }
 
     balances = await this.capBalancesToAllocation(currentPrice, balances);
 
-    const swapResult = await this.orcaClient.swapToTarget(
+    const swapResult = await this.client.swapToTarget(
       currentPrice,
       balances.tokenA,
       balances.tokenB,
@@ -383,7 +385,7 @@ export class RebalancerService {
       "swap plan evaluated"
     );
 
-    const openResult = await this.orcaClient.openCenteredPosition(
+    const openResult = await this.client.openCenteredPosition(
       currentPrice,
       balances.tokenA,
       balances.tokenB,
@@ -428,7 +430,7 @@ export class RebalancerService {
     }
 
     const livePosition = state.activePositionMint
-      ? await this.orcaClient.findManagedPosition(state.activePositionMint)
+      ? await this.client.findManagedPosition(state.activePositionMint)
       : null;
     let phase: RebalancePhase = "closing";
     let plannedPositionMint: string | null = null;
@@ -524,7 +526,7 @@ export class RebalancerService {
       return;
     }
 
-    const livePosition = await this.orcaClient.findManagedPosition(pending.previousPositionMint);
+    const livePosition = await this.client.findManagedPosition(pending.previousPositionMint);
     if (!livePosition) {
       await this.advancePendingPhase(state, "swapping", "position already closed on-chain");
       return;
@@ -599,7 +601,7 @@ export class RebalancerService {
       return;
     }
 
-    const owner = this.orcaClient.getOwnerAddress();
+    const owner = this.client.getOwnerAddress();
     let balancesBeforeSwap = pending.previousPositionMint
       ? await this.waitForPostCloseBalances(owner, pending.previousPositionMint, 0n, 0n)
       : await this.accountReader.getWalletBalances(owner, this.config.TOKEN_A_MINT, this.config.TOKEN_B_MINT);
@@ -628,7 +630,7 @@ export class RebalancerService {
         return;
       }
 
-      const swapResult = await this.orcaClient.swapToTarget(
+      const swapResult = await this.client.swapToTarget(
         pending.targetCenterPrice,
         balancesBeforeSwap.tokenA,
         balancesBeforeSwap.tokenB,
@@ -660,7 +662,7 @@ export class RebalancerService {
           tokenA: balancesBeforeSwap.tokenA.toString(),
           tokenB: balancesBeforeSwap.tokenB.toString(),
           entryCapitalQuote: pending.entryCapitalQuote,
-          swapAssessment: this.orcaClient.assessSwapToTarget(
+          swapAssessment: this.client.assessSwapToTarget(
             pending.targetCenterPrice,
             balancesBeforeSwap.tokenA,
             balancesBeforeSwap.tokenB
@@ -699,7 +701,7 @@ export class RebalancerService {
     }
 
     try {
-      let balances = await this.orcaClient.getWalletBalances();
+      let balances = await this.client.getWalletBalances();
       balances = await this.fundWalletForAllocationIfNeeded(state, pending, balances, "opening");
 
       balances = await this.capBalancesToAllocation(
@@ -759,7 +761,7 @@ export class RebalancerService {
         );
       } else if (openResult.positionMint) {
         try {
-          const openMarkQuote = await this.orcaClient.closePosition(openResult.positionMint, false, 0);
+          const openMarkQuote = await this.client.closePosition(openResult.positionMint, false, 0);
           const openMarkSummary = describeCloseQuote(
             pending.targetCenterPrice,
             openMarkQuote.quote,
@@ -853,7 +855,7 @@ export class RebalancerService {
     await this.stateStore.save(state);
     this.logTimeoutDetected("closing", error, pending);
 
-    const livePosition = await this.orcaClient.findManagedPosition(pending.previousPositionMint);
+    const livePosition = await this.client.findManagedPosition(pending.previousPositionMint);
     const outcome = classifyCloseTimeout(
       pending.previousPositionMint,
       livePosition?.positionMint ?? null
@@ -895,7 +897,7 @@ export class RebalancerService {
       return false;
     }
 
-    const livePosition = await this.orcaClient.findManagedPosition(pending.previousPositionMint);
+    const livePosition = await this.client.findManagedPosition(pending.previousPositionMint);
     if (livePosition) {
       return false;
     }
@@ -972,7 +974,7 @@ export class RebalancerService {
     }
 
     const livePosition = pending.previousPositionMint
-      ? await this.orcaClient.findManagedPosition(pending.previousPositionMint)
+      ? await this.client.findManagedPosition(pending.previousPositionMint)
       : null;
 
     if (!livePosition) {
@@ -1094,10 +1096,10 @@ export class RebalancerService {
 
     const balances = await this.capBalancesToAllocation(
       pending.targetCenterPrice,
-      await this.orcaClient.getWalletBalances()
+      await this.client.getWalletBalances()
     );
     const needsSwap =
-      this.orcaClient.assessSwapToTarget(
+      this.client.assessSwapToTarget(
         pending.targetCenterPrice,
         balances.tokenA,
         balances.tokenB
@@ -1148,7 +1150,7 @@ export class RebalancerService {
     this.logTimeoutDetected("opening", error, pending);
 
     const livePosition = pending.plannedPositionMint
-      ? await this.orcaClient.findManagedPosition(pending.plannedPositionMint)
+      ? await this.client.findManagedPosition(pending.plannedPositionMint)
       : null;
 
     const adoptablePosition = livePosition ?? await this.findAdoptableOpenTimeoutPosition(pending);
@@ -1187,7 +1189,7 @@ export class RebalancerService {
         let recoveredEntryTokenB = pending.entryTokenB ?? "0";
 
         try {
-          const recoveredOpenQuote = await this.orcaClient.closePosition(adoptablePosition.positionMint, false, 0);
+          const recoveredOpenQuote = await this.client.closePosition(adoptablePosition.positionMint, false, 0);
           const recoveredOpenSummary = describeCloseQuote(
             pending.targetCenterPrice,
             recoveredOpenQuote.quote,
@@ -1244,7 +1246,7 @@ export class RebalancerService {
 
     if (outcome === "retry" && !adoptablePosition) {
       const previousStillLive = pending.previousPositionMint
-        ? await this.orcaClient.findManagedPosition(pending.previousPositionMint)
+        ? await this.client.findManagedPosition(pending.previousPositionMint)
         : null;
 
       if (!previousStillLive) {
@@ -1340,7 +1342,7 @@ export class RebalancerService {
       claimedPositionMints.delete(pending.previousPositionMint);
     }
 
-    const poolPositions = await this.orcaClient.listManagedPositions(this.config.ORCA_WHIRLPOOL_ADDRESS);
+    const poolPositions = await this.client.listManagedPositions(this.config.ORCA_WHIRLPOOL_ADDRESS);
     const candidates = poolPositions.filter((position) => {
       if (!position.positionMint || position.positionMint === pending.previousPositionMint) {
         return false;
@@ -1510,7 +1512,7 @@ export class RebalancerService {
       const slippageBps = slippageAttempts[attemptIndex];
 
       try {
-        return await this.orcaClient.closePosition(positionMint, execute, slippageBps);
+        return await this.client.closePosition(positionMint, execute, slippageBps);
       } catch (error) {
         lastError = error;
         if (!this.isTokenMinSubceeded(error) || attemptIndex === slippageAttempts.length - 1) {
@@ -1559,7 +1561,7 @@ export class RebalancerService {
       const { slippageBps, deploymentBufferBps } = attempts[attemptIndex];
 
       try {
-        return await this.orcaClient.openCenteredPosition(
+        return await this.client.openCenteredPosition(
           currentPrice,
           tokenA,
           tokenB,
@@ -1709,12 +1711,12 @@ export class RebalancerService {
     minimumTokenA: bigint,
     minimumTokenB: bigint
   ) {
-    this.orcaClient.clearPositionCache();
+    this.client.clearPositionCache();
     await this.sleep(2_000);
 
     const [balances, livePosition] = await Promise.all([
       this.accountReader.getWalletBalances(owner, this.config.TOKEN_A_MINT, this.config.TOKEN_B_MINT),
-      this.orcaClient.findManagedPosition(closedPositionMint)
+      this.client.findManagedPosition(closedPositionMint)
     ]);
 
     const positionGone = !livePosition || livePosition.positionMint !== closedPositionMint;
@@ -1724,7 +1726,7 @@ export class RebalancerService {
       return balances;
     }
 
-    this.orcaClient.clearPositionCache();
+    this.client.clearPositionCache();
     await this.sleep(3_000);
 
     return this.accountReader.getWalletBalances(owner, this.config.TOKEN_A_MINT, this.config.TOKEN_B_MINT);
@@ -1732,7 +1734,7 @@ export class RebalancerService {
 
   private async waitForPostOpenBalances(preOpenBalances: WalletBalances) {
     await this.sleep(1_500);
-    let balances = await this.orcaClient.getWalletBalances();
+    let balances = await this.client.getWalletBalances();
     const observedSpend =
       balances.tokenA < preOpenBalances.tokenA ||
       balances.tokenB < preOpenBalances.tokenB;
@@ -1742,7 +1744,7 @@ export class RebalancerService {
     }
 
     await this.sleep(2_000);
-    balances = await this.orcaClient.getWalletBalances();
+    balances = await this.client.getWalletBalances();
     return balances;
   }
 
@@ -1886,7 +1888,7 @@ export class RebalancerService {
     const deploymentBufferBps = nextOpenAttempt?.deploymentBufferBps ?? this.config.OPEN_DEPLOYMENT_BUFFER_BPS;
 
     for (let attemptIndex = 0; attemptIndex < maxAttempts; attemptIndex += 1) {
-      const assessment = this.orcaClient.assessSwapToOpenTarget(
+      const assessment = this.client.assessSwapToOpenTarget(
         pending.targetCenterPrice,
         balances.tokenA,
         balances.tokenB,
@@ -1923,7 +1925,7 @@ export class RebalancerService {
         break;
       }
 
-      const swapResult = await this.orcaClient.swapToOpenTarget(
+      const swapResult = await this.client.swapToOpenTarget(
         pending.targetCenterPrice,
         balances.tokenA,
         balances.tokenB,
@@ -1964,7 +1966,7 @@ export class RebalancerService {
 
       balances = await this.capBalancesToAllocation(
         pending.targetCenterPrice,
-        await this.orcaClient.getWalletBalances()
+        await this.client.getWalletBalances()
       );
     }
 
@@ -2000,7 +2002,7 @@ export class RebalancerService {
       return balances;
     }
 
-    const fundingResult = await this.orcaClient.fundQuoteTokenFromWallet(fundingTargetRaw, true);
+    const fundingResult = await this.client.fundQuoteTokenFromWallet(fundingTargetRaw, true);
     if (fundingResult.txIds.length === 0) {
       this.logger.warn(
         {
@@ -2033,7 +2035,7 @@ export class RebalancerService {
       "wallet funding swap(s) completed before open"
     );
 
-    return await this.orcaClient.getWalletBalances();
+    return await this.client.getWalletBalances();
   }
 
   private async runExclusive<T>(reason: "trigger" | "manual" | "recovery", task: () => Promise<T>): Promise<T> {

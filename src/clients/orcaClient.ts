@@ -11,6 +11,7 @@ import {
 import { RpcAccountReader, type WalletAssetBalance } from "../infra/rpcAccountReader.js";
 import { isRecoverableRpcError } from "../infra/rpcFailover.js";
 import { computeBand, computeTargetValueWeights, fromBaseUnits, toBaseUnits } from "../strategy/bands.js";
+import type { PlatformClient } from "./platformClient.js";
 
 interface WhirlpoolSdkModule {
   fetchWhirlpool?: (...args: unknown[]) => Promise<any>;
@@ -137,7 +138,7 @@ export class InsufficientAllocationError extends Error {
   }
 }
 
-export class OrcaClient {
+export class OrcaClient implements PlatformClient {
   private static readonly SOL_MINT = "So11111111111111111111111111111111111111112";
   private static readonly USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
   private static readonly COMPUTE_BUDGET_PROGRAM_ID = "ComputeBudget111111111111111111111111111111";
@@ -234,7 +235,8 @@ export class OrcaClient {
       tokenBMint: this.config.TOKEN_B_MINT,
       tokenADecimals: this.config.TOKEN_A_DECIMALS,
       tokenBDecimals: this.config.TOKEN_B_DECIMALS,
-      raw: pool
+      raw: pool,
+      platform: "orca" as const
     };
   }
 
@@ -261,7 +263,8 @@ export class OrcaClient {
       tokenADecimals,
       tokenBDecimals,
       tokenASymbol: this.inferTokenSymbol(tokenAMint),
-      tokenBSymbol: this.inferTokenSymbol(tokenBMint)
+      tokenBSymbol: this.inferTokenSymbol(tokenBMint),
+      platform: "orca" as const
     };
   }
 

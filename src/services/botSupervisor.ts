@@ -18,6 +18,8 @@ import { RpcAccountReader } from "../infra/rpcAccountReader.js";
 import { isRecoverableRpcError } from "../infra/rpcFailover.js";
 import { TransactionInspector } from "../infra/transactionInspector.js";
 import { OrcaClient } from "../clients/orcaClient.js";
+import { MeteoraClient } from "../clients/meteoraClient.js";
+import type { PlatformClient } from "../clients/platformClient.js";
 import { RebalancerService } from "./rebalancer.js";
 import { PositionPnlService } from "./positionPnlService.js";
 import { resolveTokenPricesUsdc, resolveTokenPricesUsdcStrict } from "./pnlMath.js";
@@ -33,7 +35,7 @@ interface BotRunner {
   timer: NodeJS.Timeout | null;
   inTick: boolean;
   service: RebalancerService;
-  client: OrcaClient;
+  client: PlatformClient;
 }
 
 export class BotSupervisor {
@@ -112,7 +114,9 @@ export class BotSupervisor {
 
   async createBot(input: CreateBotInput): Promise<BotRecord> {
     await this.init();
-    const metadata = await this.sharedClient.discoverPoolMetadata(input.whirlpoolAddress);
+    const metadata = input.platform === "meteora"
+      ? await new MeteoraClient(this.config).discoverPoolMetadata(input.whirlpoolAddress)
+      : await this.sharedClient.discoverPoolMetadata(input.whirlpoolAddress);
     const record = await this.registryStore.createBot(input, metadata);
     await this.ensureRunner(record);
     return record;
@@ -225,11 +229,25 @@ export class BotSupervisor {
   }> {
     await this.init();
     const bots = await this.registryStore.listBots();
-    const livePositions = await this.sharedClient.listAllOwnerPositions();
-    return this.pnlService.getDashboardSnapshot(
-      bots,
-      livePositions.map((position) => position.positionMint)
-    );
+    const orcaPositions = await this.sharedClient.listAllOwnerPositions();
+    const livePositionMints = new Set(orcaPositions.map((p) => p.positionMint));
+    // Collect positions from Meteora runners (not covered by sharedClient)
+    for (const bot of bots) {
+      if (bot.definition.platform === "meteora") {
+        const runner = this.runners.get(bot.definition.id);
+        if (runner) {
+          try {
+            const positions = await runner.client.listAllOwnerPositions();
+            for (const pos of positions) {
+              livePositionMints.add(pos.positionMint);
+            }
+          } catch {
+            // ignore errors for individual Meteora runners
+          }
+        }
+      }
+    }
+    return this.pnlService.getDashboardSnapshot(bots, [...livePositionMints]);
   }
 
   async getTransactions(logPath: string, botId?: BotId) {
@@ -299,7 +317,9 @@ export class BotSupervisor {
       whirlpoolAddress: record.definition.whirlpoolAddress
     });
     const stateStore = new BotRuntimeStore(this.registryStore, record.definition.id);
-    const client = new OrcaClient(botConfig);
+    const client: PlatformClient = record.definition.platform === "meteora"
+      ? new MeteoraClient(botConfig)
+      : new OrcaClient(botConfig);
     await client.init();
 
     const runner: BotRunner = {

@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 
 import type { BotRecord, BotDefinition, GlobalPnlSummary, PositionLedgerCloseInput, PositionLedgerMarkInput, PositionLedgerOpenInput, PositionPnlRecord, BotPnlSummary } from "../domain.js";
-import { OrcaClient } from "../clients/orcaClient.js";
+import type { PlatformClient } from "../clients/platformClient.js";
 import { PnlLedgerStore } from "../state/pnlLedgerStore.js";
 import {
   computeNetPnl,
@@ -187,7 +187,7 @@ export class PositionPnlService {
     record.entryTokenB = input.exitTokenB;
   }
 
-  async markOpenPosition(bot: BotDefinition, bots: BotRecord[], client: OrcaClient, input: PositionLedgerMarkInput) {
+  async markOpenPosition(bot: BotDefinition, bots: BotRecord[], client: PlatformClient, input: PositionLedgerMarkInput) {
     let record = await this.ledgerStore.getRecordByPositionMint(input.positionMint);
     const prices = await this.resolveTokenPrices(bot, bots, input.centerPrice);
     if (!prices) {

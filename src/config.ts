@@ -2,6 +2,7 @@ import dotenv from "dotenv";
 import { z } from "zod";
 
 import { normalizeRpcUrls } from "./infra/rpcFailover.js";
+import type { BotPlatform, MeteoraStrategyType } from "./domain.js";
 
 dotenv.config({ override: true });
 
@@ -43,6 +44,14 @@ const envSchema = z.object({
 export type AppConfig = z.infer<typeof envSchema> & {
   maxSlippageFraction: number;
   solanaRpcUrls: string[];
+  /** Meteora: % below current price for the lower bound of the LP range */
+  RANGE_PCT_BELOW: number;
+  /** Meteora: % above current price for the upper bound of the LP range */
+  RANGE_PCT_ABOVE: number;
+  /** Which DEX platform this bot is targeting */
+  BOT_PLATFORM: BotPlatform;
+  /** Meteora liquidity distribution strategy */
+  METEORA_STRATEGY_TYPE: MeteoraStrategyType;
 };
 
 export function loadConfig(): AppConfig {
@@ -54,6 +63,10 @@ export function loadConfig(): AppConfig {
     solanaRpcUrls: normalizeRpcUrls(
       parsed.SOLANA_RPC_URL,
       parsed.SOLANA_RPC_FALLBACK_URLS
-    )
+    ),
+    RANGE_PCT_BELOW: parsed.RANGE_PCT,
+    RANGE_PCT_ABOVE: parsed.RANGE_PCT,
+    BOT_PLATFORM: "orca" as BotPlatform,
+    METEORA_STRATEGY_TYPE: "Spot" as MeteoraStrategyType
   };
 }
