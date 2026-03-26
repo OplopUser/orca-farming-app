@@ -271,6 +271,24 @@ button:disabled {
   color: #b8c7d2;
 }
 
+.platform-badge {
+  font-size: 0.72em;
+  font-weight: 600;
+  border-radius: 4px;
+  padding: 1px 5px;
+  vertical-align: middle;
+}
+
+.platform-orca {
+  background: rgba(73, 209, 141, 0.14);
+  color: var(--play);
+}
+
+.platform-meteora {
+  background: rgba(103, 180, 255, 0.15);
+  color: var(--secondary);
+}
+
 .bots-grid {
   margin-top: 20px;
   display: grid;

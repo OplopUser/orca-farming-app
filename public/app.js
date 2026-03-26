@@ -20,12 +20,34 @@ const typeFilter = document.getElementById("typeFilter");
 const statusFilter = document.getElementById("statusFilter");
 const searchFilter = document.getElementById("searchFilter");
 const createBotForm = document.getElementById("createBotForm");
+const platformInput = document.getElementById("platformInput");
 const activeLpGrid = document.getElementById("activeLpGrid");
 
 let latestBots = [];
 let latestTransactions = [];
 let latestPnlPositions = [];
 let previousBotIds = [];
+
+function applyPlatformVisibility(platform) {
+  const meteoraEls = document.querySelectorAll(".meteora-only");
+  const orcaEls = document.querySelectorAll(".orca-only");
+  const isMeteora = platform === "meteora";
+  for (const el of meteoraEls) {
+    el.hidden = !isMeteora;
+    const input = el.querySelector("input, select");
+    if (input) input.required = isMeteora;
+  }
+  for (const el of orcaEls) {
+    el.hidden = isMeteora;
+    const input = el.querySelector("input, select");
+    if (input) input.required = !isMeteora;
+  }
+}
+
+if (platformInput) {
+  platformInput.addEventListener("change", () => applyPlatformVisibility(platformInput.value));
+  applyPlatformVisibility(platformInput.value);
+}
 
 async function request(path, options = {}) {
   const response = await fetch(path, {
@@ -186,11 +208,13 @@ function renderSelectOptions(select, values, allLabel) {
 }
 
 function botCardHtml(bot) {
+  const platformLabel = bot.platform === "meteora" ? "Meteora DLMM" : "Orca Whirlpool";
+  const platformClass = bot.platform === "meteora" ? "platform-meteora" : "platform-orca";
   return `
     <article class="bot-card" data-bot-id="${bot.id}">
       <div class="bot-head">
         <div>
-          <p class="eyebrow">${bot.tokenPair}</p>
+          <p class="eyebrow">${bot.tokenPair} &middot; <span class="platform-badge ${platformClass}">${platformLabel}</span></p>
           <h3>${bot.name}</h3>
         </div>
         <span class="badge ${getBadgeClass(bot.runState)}">${bot.runState}</span>
@@ -646,12 +670,18 @@ async function refreshStatus() {
 createBotForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const formData = new FormData(createBotForm);
-  const payload = Object.fromEntries(formData.entries());
+  const raw = Object.fromEntries(formData.entries());
+  const stringFields = new Set(["name", "whirlpoolAddress", "platform", "meteoraStrategyType"]);
+  const payload = {};
+  for (const [key, value] of Object.entries(raw)) {
+    payload[key] = stringFields.has(key) ? value : Number(value);
+  }
 
-  for (const key of Object.keys(payload)) {
-    if (key !== "name" && key !== "whirlpoolAddress") {
-      payload[key] = Number(payload[key]);
-    }
+  // For Meteora bots, derive rangePct from the asymmetric ranges
+  if (payload.platform === "meteora") {
+    const below = payload.rangePctBelow ?? 1;
+    const above = payload.rangePctAbove ?? 1;
+    payload.rangePct = Math.max(below, above);
   }
 
   try {
@@ -660,6 +690,7 @@ createBotForm.addEventListener("submit", async (event) => {
       body: JSON.stringify(payload)
     });
     createBotForm.reset();
+    applyPlatformVisibility(platformInput?.value ?? "orca");
     await refreshStatus();
   } catch (error) {
     console.error(error);

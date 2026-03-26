@@ -247,9 +247,13 @@ function summarizeBot(
     enabled: definition.enabled,
     archived: definition.archived,
     monitoringActive: runtime.monitoringActive,
+    platform: definition.platform ?? "orca",
     whirlpoolAddress: definition.whirlpoolAddress,
     allocationUsdc: definition.allocationUsdc,
     rangePct: definition.rangePct,
+    rangePctBelow: definition.rangePctBelow,
+    rangePctAbove: definition.rangePctAbove,
+    meteoraStrategyType: definition.meteoraStrategyType,
     rebalanceDriftPct: definition.rebalanceDriftPct,
     pollSeconds: definition.pollSeconds,
     maxSlippageBps: definition.maxSlippageBps,
@@ -330,6 +334,8 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, url
       whirlpoolAddress: string;
       allocationUsdc: number;
       rangePct: number;
+      rangePctBelow?: number;
+      rangePctAbove?: number;
       rebalanceDriftPct: number;
       pollSeconds: number;
       maxSlippageBps: number;
@@ -342,8 +348,18 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, url
       openFinalDeploymentBufferBps: number;
       minSwapQuoteValue: number;
       openBalanceToleranceBps: number;
+      platform?: string;
+      meteoraStrategyType?: string;
     }>(request);
-    const bot = await supervisor.createBot(payload);
+    const bot = await supervisor.createBot({
+      ...payload,
+      platform: payload.platform === "meteora" ? "meteora" : "orca",
+      meteoraStrategyType: payload.meteoraStrategyType === "Curve"
+        ? "Curve"
+        : payload.meteoraStrategyType === "BidAsk"
+          ? "BidAsk"
+          : "Spot"
+    });
     invalidateStatusCache();
     return sendJson(response, 201, { bot: summarizeBot(bot) });
   }

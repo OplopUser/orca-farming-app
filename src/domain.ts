@@ -3,6 +3,8 @@ export type DriftStatus = "waiting" | "triggered";
 export type RebalancePhase = "closing" | "swapping" | "opening";
 export type BotId = string;
 export type PositionPnlStatus = "open" | "closed";
+export type BotPlatform = "orca" | "meteora";
+export type MeteoraStrategyType = "Spot" | "Curve" | "BidAsk";
 
 export interface PendingRebalance {
   phase: RebalancePhase;
@@ -56,9 +58,15 @@ export interface BotDefinition {
   name: string;
   enabled: boolean;
   archived: boolean;
+  platform: BotPlatform;
   whirlpoolAddress: string;
   allocationUsdc: number;
+  /** Symmetric ±% range for Orca bots */
   rangePct: number;
+  /** % below current price for Meteora bots (asymmetric lower bound) */
+  rangePctBelow?: number;
+  /** % above current price for Meteora bots (asymmetric upper bound) */
+  rangePctAbove?: number;
   rebalanceDriftPct: number;
   pollSeconds: number;
   maxSlippageBps: number;
@@ -77,6 +85,10 @@ export interface BotDefinition {
   tokenBMint: string;
   tokenBSymbol: string;
   tokenBDecimals: number;
+  /** Meteora only: liquidity distribution strategy */
+  meteoraStrategyType?: MeteoraStrategyType;
+  /** Meteora only: pool bin step in bps (discovered, informational) */
+  meteoraBinStep?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -117,6 +129,9 @@ export interface PoolMetadata {
   tokenBMint: string;
   tokenBSymbol: string;
   tokenBDecimals: number;
+  platform: BotPlatform;
+  /** Meteora only: pool bin step in bps */
+  binStep?: number;
 }
 
 export interface PoolSnapshot {
@@ -127,6 +142,9 @@ export interface PoolSnapshot {
   tokenADecimals: number;
   tokenBDecimals: number;
   raw: unknown;
+  platform: BotPlatform;
+  /** Meteora only: current active bin ID */
+  activeBinId?: number;
 }
 
 export interface WalletBalances {

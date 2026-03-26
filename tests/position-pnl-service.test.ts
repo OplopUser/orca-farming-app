@@ -37,6 +37,7 @@ function createBotRecord(overrides: Partial<BotRecord> = {}): BotRecord {
       tokenBMint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
       tokenBSymbol: "USDC",
       tokenBDecimals: 6,
+      platform: "orca" as const,
       createdAt: "2026-03-14T00:00:00.000Z",
       updatedAt: "2026-03-14T00:00:00.000Z"
     },

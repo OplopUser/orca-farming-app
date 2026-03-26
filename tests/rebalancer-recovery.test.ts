@@ -215,7 +215,11 @@ function createHarness(initialState: BotState, overrides: Record<string, unknown
       TOKEN_B_SYMBOL: "USDC",
       TOKEN_B_DECIMALS: 6,
       maxSlippageFraction: 0.01,
-      solanaRpcUrls: ["https://rpc.example", "https://api.mainnet-beta.solana.com"]
+      solanaRpcUrls: ["https://rpc.example", "https://api.mainnet-beta.solana.com"],
+      RANGE_PCT_BELOW: 1,
+      RANGE_PCT_ABOVE: 1,
+      BOT_PLATFORM: "orca" as const,
+      METEORA_STRATEGY_TYPE: "Spot" as const
     },
     logger as never,
     store as never,

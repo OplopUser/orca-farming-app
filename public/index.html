@@ -99,16 +99,39 @@
             <input id="nameInput" name="name" placeholder="SOL Mean Recenter" required />
           </label>
           <label class="wide">
-            <span>Pool ID / Whirlpool Address</span>
+            <span>Platform</span>
+            <select id="platformInput" name="platform">
+              <option value="orca">Orca Whirlpool</option>
+              <option value="meteora">Meteora DLMM</option>
+            </select>
+          </label>
+          <label class="wide">
+            <span>Pool Address</span>
             <input id="poolInput" name="whirlpoolAddress" placeholder="Czfq3xZZ..." required />
           </label>
           <label>
             <span>Allocation (USDC value)</span>
             <input id="allocationInput" name="allocationUsdc" type="number" min="1" step="0.01" value="100" required />
           </label>
-          <label>
+          <label class="orca-only">
             <span>LP Range %</span>
-            <input name="rangePct" type="number" min="0.01" step="0.01" value="1" required />
+            <input name="rangePct" type="number" min="0.01" step="0.01" value="1" />
+          </label>
+          <label class="meteora-only" hidden>
+            <span>Range Below % (from price)</span>
+            <input name="rangePctBelow" type="number" min="0.01" step="0.01" value="1" />
+          </label>
+          <label class="meteora-only" hidden>
+            <span>Range Above % (from price)</span>
+            <input name="rangePctAbove" type="number" min="0.01" step="0.01" value="1" />
+          </label>
+          <label class="meteora-only" hidden>
+            <span>Liquidity Strategy</span>
+            <select name="meteoraStrategyType">
+              <option value="Spot">Spot (Uniform)</option>
+              <option value="Curve">Curve (Concentrated Center)</option>
+              <option value="BidAsk">Bid-Ask (Concentrated Edges)</option>
+            </select>
           </label>
           <label>
             <span>Rebalance Drift %</span>
@@ -179,7 +202,7 @@
       <section class="panel bots-card">
         <div class="section-head">
           <div>
-            <p class="eyebrow">Live Orca Whirlpool</p>
+            <p class="eyebrow">Active Positions</p>
             <h2>Active LP Positions</h2>
           </div>
         </div>

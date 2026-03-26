@@ -6,9 +6,11 @@ import type { AppConfig } from "../config.js";
 import type {
   BotDefinition,
   BotId,
+  BotPlatform,
   BotRecord,
   BotRegistry,
   BotRuntimeState,
+  MeteoraStrategyType,
   PoolMetadata
 } from "../domain.js";
 import { createEmptyBotRuntimeState } from "./store.js";
@@ -20,6 +22,8 @@ export interface CreateBotInput {
   whirlpoolAddress: string;
   allocationUsdc: number;
   rangePct: number;
+  rangePctBelow?: number;
+  rangePctAbove?: number;
   rebalanceDriftPct: number;
   pollSeconds: number;
   maxSlippageBps: number;
@@ -32,6 +36,8 @@ export interface CreateBotInput {
   openFinalDeploymentBufferBps: number;
   minSwapQuoteValue: number;
   openBalanceToleranceBps: number;
+  platform?: BotPlatform;
+  meteoraStrategyType?: MeteoraStrategyType;
 }
 
 export interface UpdateBotInput extends Partial<CreateBotInput> {
@@ -77,6 +83,7 @@ function createDefinitionFromConfig(config: AppConfig, botId: string, now: strin
     tokenBMint: config.TOKEN_B_MINT,
     tokenBSymbol: config.TOKEN_B_SYMBOL,
     tokenBDecimals: config.TOKEN_B_DECIMALS,
+    platform: "orca" as BotPlatform,
     createdAt: now,
     updatedAt: now
   };
@@ -164,6 +171,11 @@ export class BotRegistryStore {
           tokenBMint: metadata.tokenBMint,
           tokenBSymbol: metadata.tokenBSymbol,
           tokenBDecimals: metadata.tokenBDecimals,
+          platform: input.platform ?? "orca",
+          rangePctBelow: input.rangePctBelow,
+          rangePctAbove: input.rangePctAbove,
+          meteoraStrategyType: input.meteoraStrategyType,
+          meteoraBinStep: metadata.binStep,
           createdAt: now,
           updatedAt: now
         },
