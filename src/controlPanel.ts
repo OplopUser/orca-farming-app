@@ -11,7 +11,7 @@ import { BotSupervisor } from "./services/botSupervisor.js";
 
 dotenv.config({ override: true });
 
-const HOST = "127.0.0.1";
+const HOST = process.env.UI_HOST ?? "0.0.0.0";
 const PORT = Number(process.env.UI_PORT ?? 8787);
 const PUBLIC_DIR = resolve("public");
 
@@ -200,6 +200,19 @@ function summarizeEvent(entry: Record<string, unknown>): TransactionEvent | null
     };
   }
 
+  if (msg === "compound completed") {
+    return {
+      botId,
+      botName,
+      time,
+      type: "Compound",
+      status: "Completed",
+      txId: typeof entry.compoundTxId === "string" ? entry.compoundTxId : typeof entry.harvestTxId === "string" ? entry.harvestTxId : null,
+      fees: normalizeFee(entry.txFeeLamports),
+      summary: `Compounded ${typeof entry.feesValueQuote === "number" ? entry.feesValueQuote.toFixed(4) : "?"} quote fees`
+    };
+  }
+
   if (msg === "cycle evaluated") {
     if (!(typeof entry.shouldRebalance === "boolean" && entry.shouldRebalance)) {
       return null;
@@ -247,13 +260,9 @@ function summarizeBot(
     enabled: definition.enabled,
     archived: definition.archived,
     monitoringActive: runtime.monitoringActive,
-    platform: definition.platform ?? "orca",
     whirlpoolAddress: definition.whirlpoolAddress,
     allocationUsdc: definition.allocationUsdc,
     rangePct: definition.rangePct,
-    rangePctBelow: definition.rangePctBelow,
-    rangePctAbove: definition.rangePctAbove,
-    meteoraStrategyType: definition.meteoraStrategyType,
     rebalanceDriftPct: definition.rebalanceDriftPct,
     pollSeconds: definition.pollSeconds,
     maxSlippageBps: definition.maxSlippageBps,
@@ -272,6 +281,10 @@ function summarizeBot(
     paused: runtime.paused,
     pauseReason: runtime.pauseReason,
     lastCycleAt: runtime.lastCycleAt,
+    compoundIntervalSeconds: definition.compoundIntervalSeconds,
+    compoundMinQuoteValue: definition.compoundMinQuoteValue,
+    lastCompoundAt: runtime.lastCompoundAt,
+    totalCompoundCount: runtime.totalCompoundCount ?? 0,
     pnl: pnlSummary ?? null
   };
 }
@@ -334,8 +347,6 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, url
       whirlpoolAddress: string;
       allocationUsdc: number;
       rangePct: number;
-      rangePctBelow?: number;
-      rangePctAbove?: number;
       rebalanceDriftPct: number;
       pollSeconds: number;
       maxSlippageBps: number;
@@ -343,23 +354,19 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, url
       closeFinalRetrySlippageBps: number;
       openRetrySlippageBps: number;
       openFinalRetrySlippageBps: number;
+      slippageRetriesPerTier: number;
       openDeploymentBufferBps: number;
       openRetryDeploymentBufferBps: number;
       openFinalDeploymentBufferBps: number;
       minSwapQuoteValue: number;
       openBalanceToleranceBps: number;
-      platform?: string;
-      meteoraStrategyType?: string;
+      compoundIntervalSeconds: number;
+      compoundMinQuoteValue: number;
+      driftConfirmPolls: number;
+      rebalanceMinBenefitMultiple: number;
+      harvestMinBenefitMultiple: number;
     }>(request);
-    const bot = await supervisor.createBot({
-      ...payload,
-      platform: payload.platform === "meteora" ? "meteora" : "orca",
-      meteoraStrategyType: payload.meteoraStrategyType === "Curve"
-        ? "Curve"
-        : payload.meteoraStrategyType === "BidAsk"
-          ? "BidAsk"
-          : "Spot"
-    });
+    const bot = await supervisor.createBot(payload);
     invalidateStatusCache();
     return sendJson(response, 201, { bot: summarizeBot(bot) });
   }
@@ -394,6 +401,8 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, url
         rebalanceDriftPct?: number;
         pollSeconds?: number;
         maxSlippageBps?: number;
+        compoundIntervalSeconds?: number;
+        compoundMinQuoteValue?: number;
       }>(request);
       const bot = await supervisor.updateBot(botId, payload);
       if (!bot) {
@@ -449,7 +458,23 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, url
 
     if (parts[3] === "rebalance" && method === "POST") {
       await supervisor.rebalanceNow(botId);
+      invalidateStatusCache();
       return sendNoContent(response);
+    }
+
+    if (parts[3] === "compound" && method === "POST") {
+      await supervisor.compoundNow(botId);
+      invalidateStatusCache();
+      return sendNoContent(response);
+    }
+
+    if (parts[3] === "close-position" && method === "POST") {
+      const result = await supervisor.closePositionNow(botId);
+      invalidateStatusCache();
+      if (!result) {
+        return sendError(response, 404, "No active position to close");
+      }
+      return sendJson(response, 200, { positionMint: result.positionMint, txId: result.txId });
     }
 
     if (parts[3] === "transactions" && method === "GET") {
@@ -466,11 +491,7 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, url
 }
 
 async function main() {
-  // Attempt early init but don't block server startup on RPC/wallet errors.
-  // The supervisor will retry init() on the first API request.
-  supervisor.init().catch((err) => {
-    logger.warn({ error: (err as Error).message }, "supervisor pre-init failed; will retry on first request");
-  });
+  await supervisor.init();
 
   const server = createServer(async (request, response) => {
     try {
@@ -482,9 +503,7 @@ async function main() {
 
       await serveStatic(url.pathname, response);
     } catch (error) {
-      const err = error as Error;
-      logger.error({ error: err.message, stack: err.stack }, "api error");
-      sendError(response, 500, err.message);
+      sendError(response, 500, (error as Error).message);
     }
   });
 
