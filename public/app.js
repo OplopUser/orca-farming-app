@@ -5,13 +5,22 @@ const allocationValue = document.getElementById("allocationValue");
 const walletTokenA = document.getElementById("walletTokenA");
 const walletTokenB = document.getElementById("walletTokenB");
 const queueBadge = document.getElementById("queueBadge");
-const totalPnlValue = document.getElementById("totalPnlValue");
+const formulaPnlValue = document.getElementById("formulaPnlValue");
+const totalDepositValue = document.getElementById("totalDepositValue");
+const totalWithdrawValue = document.getElementById("totalWithdrawValue");
 const realizedPnlValue = document.getElementById("realizedPnlValue");
 const openPnlValue = document.getElementById("openPnlValue");
 const feesEarnedValue = document.getElementById("feesEarnedValue");
 const openPositionsValue = document.getElementById("openPositionsValue");
 const closedPositionsValue = document.getElementById("closedPositionsValue");
 const orphanWarning = document.getElementById("orphanWarning");
+
+function formatUsdKpi(value) {
+  if (value == null || Number.isNaN(Number(value))) return "-";
+  const amount = Number(value);
+  const sign = amount > 0 ? "+" : "";
+  return `${sign}$${amount.toFixed(2)}`;
+}
 const botsGrid = document.getElementById("botsGrid");
 const pnlPositionsBody = document.getElementById("pnlPositionsBody");
 const transactionsBody = document.getElementById("transactionsBody");
@@ -162,22 +171,29 @@ function renderWallet(wallet) {
   walletAddress.textContent = formatValue(wallet.walletAddress);
   enabledBots.textContent = formatValue(wallet.enabledBots);
   monitoringBots.textContent = formatValue(wallet.monitoringBots);
-  allocationValue.textContent = `${formatValue(wallet.totalAllocatedUsdc)} USDC`;
+  allocationValue.textContent = `$${formatValue(wallet.totalAllocatedUsdc)}`;
   walletTokenA.textContent = formatValue(wallet.availableTokenA);
   walletTokenB.textContent = formatValue(wallet.availableTokenB);
   queueBadge.textContent = `Queue ${wallet.queueDepth}`;
   queueBadge.className = `badge ${wallet.queueDepth ? "triggered" : wallet.overAllocated ? "paused" : "idle"}`;
 }
 
+function formatUsdAbs(value) {
+  if (value == null || Number.isNaN(Number(value))) return "-";
+  return `$${Number(value).toFixed(2)}`;
+}
+
 function renderPnl(summary) {
-  totalPnlValue.textContent = formatUsd(summary?.totalNetPnlUsdc);
-  totalPnlValue.className = `metric-value ${pnlClass(summary?.totalNetPnlUsdc)}`;
-  realizedPnlValue.textContent = formatUsd(summary?.realizedNetPnlUsdc);
-  realizedPnlValue.className = `metric-value ${pnlClass(summary?.realizedNetPnlUsdc)}`;
-  openPnlValue.textContent = formatUsd(summary?.openNetPnlUsdc);
-  openPnlValue.className = `metric-value ${pnlClass(summary?.openNetPnlUsdc)}`;
-  feesEarnedValue.textContent = formatUsd(summary?.feesEarnedUsdc);
-  feesEarnedValue.className = `metric-value ${pnlClass(summary?.feesEarnedUsdc)}`;
+  formulaPnlValue.textContent = formatUsdKpi(summary?.formulaPnlUsdc);
+  formulaPnlValue.className = `kpi-value ${pnlClass(summary?.formulaPnlUsdc)}`;
+  totalDepositValue.textContent = formatUsdAbs(summary?.totalDepositUsdc);
+  totalWithdrawValue.textContent = formatUsdAbs(summary?.totalWithdrawUsdc);
+  realizedPnlValue.textContent = formatUsdKpi(summary?.realizedNetPnlUsdc);
+  realizedPnlValue.className = `kpi-value ${pnlClass(summary?.realizedNetPnlUsdc)}`;
+  openPnlValue.textContent = formatUsdKpi(summary?.openNetPnlUsdc);
+  openPnlValue.className = `kpi-value ${pnlClass(summary?.openNetPnlUsdc)}`;
+  feesEarnedValue.textContent = formatUsdKpi(summary?.feesEarnedUsdc);
+  feesEarnedValue.className = `kpi-value ${pnlClass(summary?.feesEarnedUsdc)}`;
   openPositionsValue.textContent = formatValue(summary?.openPositionCount);
   closedPositionsValue.textContent = formatValue(summary?.closedPositionCount);
 
@@ -239,6 +255,7 @@ function botCardHtml(bot) {
         <button class="play" data-action="start">Start</button>
         <button class="stop" data-action="stop">Stop</button>
         <button class="rebalance" data-action="rebalance">Rebalance</button>
+        <button class="secondary" data-action="compound">Compound</button>
         <button class="secondary" data-action="resume">Resume</button>
         <button class="secondary" data-action="archive">Archive</button>
       </div>
@@ -249,6 +266,8 @@ function botCardHtml(bot) {
         <label><span>Drift %</span><input name="rebalanceDriftPct" type="number" min="0.01" step="0.01" value="${bot.rebalanceDriftPct}" /></label>
         <label><span>Poll Seconds</span><input name="pollSeconds" type="number" min="5" step="1" value="${bot.pollSeconds}" /></label>
         <label><span>Max Slippage</span><input name="maxSlippageBps" type="number" min="1" step="1" value="${bot.maxSlippageBps ?? 100}" /></label>
+        <label><span>Compound Interval (s)</span><input name="compoundIntervalSeconds" type="number" min="0" step="1" value="${bot.compoundIntervalSeconds ?? 0}" /></label>
+        <label><span>Compound Min Value</span><input name="compoundMinQuoteValue" type="number" min="0" step="0.01" value="${bot.compoundMinQuoteValue ?? 0.5}" /></label>
         <div class="form-actions"><button class="secondary" type="submit">Save Changes</button></div>
       </form>
     </article>
@@ -479,7 +498,7 @@ function renderActiveLpPositions(records) {
           : null;
 
       return `
-        <article class="lp-card">
+        <article class="lp-card" data-bot-id="${bot.id}">
           <div class="lp-head">
             <div>
               <p class="eyebrow">${bot.tokenPair}</p>
@@ -536,6 +555,10 @@ function renderActiveLpPositions(records) {
               <dd class="${pnlClass(netYieldPct)}">${netYieldPct != null ? netYieldPct.toFixed(3) + "%" : "-"}</dd>
             </div>
             <div>
+              <dt>Compounded</dt>
+              <dd>${formatUsd(ledgerRecord?.cumulativeCompoundedFeesUsdc)} (${ledgerRecord?.compoundCount ?? 0}x)</dd>
+            </div>
+            <div>
               <dt>Duration</dt>
               <dd>${formatDuration(ledgerRecord?.openedAt)}</dd>
             </div>
@@ -569,6 +592,10 @@ function renderActiveLpPositions(records) {
               <dd>Awaiting open-position sync</dd>
             </div>`}
           </dl>
+          <div class="card-actions">
+            <button class="secondary" data-action="compound">Compound</button>
+            <button class="stop" data-action="close-position">Close Position</button>
+          </div>
         </article>
       `;
     })
@@ -724,6 +751,8 @@ botsGrid.addEventListener("click", async (event) => {
       await request(`/api/bots/${botId}`, { method: "DELETE" });
     } else if (action === "rebalance") {
       await request(`/api/bots/${botId}/rebalance`, { method: "POST" });
+    } else if (action === "compound") {
+      await request(`/api/bots/${botId}/compound`, { method: "POST" });
     } else {
       await request(`/api/bots/${botId}/${action}`, { method: "POST" });
     }
@@ -763,6 +792,66 @@ botsGrid.addEventListener("submit", async (event) => {
   } catch (error) {
     console.error(error);
     alert(error.message);
+  }
+});
+
+activeLpGrid.addEventListener("click", async (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) {
+    return;
+  }
+
+  const action = target.dataset.action;
+  if (!action) {
+    return;
+  }
+
+  const card = target.closest("[data-bot-id]");
+  if (!card) {
+    return;
+  }
+
+  const botId = card.getAttribute("data-bot-id");
+  if (!botId) {
+    return;
+  }
+
+  if (action === "compound") {
+    target.disabled = true;
+    target.textContent = "Compounding...";
+
+    try {
+      await request(`/api/bots/${botId}/compound`, { method: "POST" });
+      await refreshStatus();
+    } catch (error) {
+      console.error(error);
+      alert(error.message);
+    } finally {
+      target.disabled = false;
+      target.textContent = "Compound";
+    }
+    return;
+  }
+
+  if (action === "close-position") {
+    if (!confirm("Close this LP position? Tokens will be returned to the wallet.")) {
+      return;
+    }
+
+    target.disabled = true;
+    target.textContent = "Closing...";
+
+    try {
+      const result = await request(`/api/bots/${botId}/close-position`, { method: "POST" });
+      alert(`Position closed. Tx: ${result?.txId ?? "unknown"}`);
+      await refreshStatus();
+    } catch (error) {
+      console.error(error);
+      alert(error.message);
+    } finally {
+      target.disabled = false;
+      target.textContent = "Close Position";
+    }
   }
 });
 

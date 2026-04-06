@@ -24,6 +24,9 @@ function createState(overrides: Partial<BotState> = {}): BotState {
     pendingRebalance: null,
     positionLowerPrice: null,
     positionUpperPrice: null,
+    lastCompoundAt: null,
+    totalCompoundCount: 0,
+    consecutiveDriftPolls: 0,
     ...overrides
   };
 }
@@ -202,12 +205,18 @@ function createHarness(initialState: BotState, overrides: Record<string, unknown
       CLOSE_FINAL_RETRY_SLIPPAGE_BPS: 1000,
       OPEN_RETRY_SLIPPAGE_BPS: 300,
       OPEN_FINAL_RETRY_SLIPPAGE_BPS: 1000,
+      SLIPPAGE_RETRIES_PER_TIER: 1,
       OPEN_DEPLOYMENT_BUFFER_BPS: 100,
       OPEN_RETRY_DEPLOYMENT_BUFFER_BPS: 300,
       OPEN_FINAL_DEPLOYMENT_BUFFER_BPS: 500,
       SOL_RESERVE_LAMPORTS: 50_000_000,
       MIN_SWAP_USDC: 10,
       OPEN_BALANCE_TOLERANCE_BPS: 25,
+      COMPOUND_INTERVAL_SECONDS: 0,
+      COMPOUND_MIN_QUOTE_VALUE: 0.5,
+      DRIFT_CONFIRM_POLLS: 2,
+      REBALANCE_MIN_BENEFIT_MULTIPLE: 1.5,
+      HARVEST_MIN_BENEFIT_MULTIPLE: 2.0,
       TOKEN_A_MINT: "sol",
       TOKEN_A_SYMBOL: "SOL",
       TOKEN_A_DECIMALS: 9,
@@ -216,10 +225,6 @@ function createHarness(initialState: BotState, overrides: Record<string, unknown
       TOKEN_B_DECIMALS: 6,
       maxSlippageFraction: 0.01,
       solanaRpcUrls: ["https://rpc.example", "https://api.mainnet-beta.solana.com"],
-      RANGE_PCT_BELOW: 1,
-      RANGE_PCT_ABOVE: 1,
-      BOT_PLATFORM: "orca" as const,
-      METEORA_STRATEGY_TYPE: "Spot" as const
     },
     logger as never,
     store as never,
@@ -451,7 +456,7 @@ describe("rebalancer timeout recovery", () => {
 
     expect(harness.getState().paused).toBe(true);
     expect(harness.getState().pauseReason).toContain("Ambiguous closing state after timeout");
-    expect(closePosition).toHaveBeenCalledTimes(2);
+    expect(closePosition).toHaveBeenCalledTimes(4);
   });
 
   it("schedules an automatic retry after a deterministic close simulation failure", async () => {
@@ -598,6 +603,89 @@ describe("rebalancer timeout recovery", () => {
     expect(harness.getState().pendingRebalance?.nextRetryAt).not.toBeNull();
     expect(harness.getState().latestAction).toBe("retrying rebalance before open after simulation failure");
     expect(openCenteredPosition).toHaveBeenCalledTimes(3);
+  });
+
+  it("closes the previous position before opening a replacement when opening resumes too early", async () => {
+    const openCenteredPosition = vi.fn(async () => ({
+      dryRun: false,
+      positionMint: "new-position",
+      lowerPrice: 98.4,
+      upperPrice: 100.4,
+      quote: null,
+      txId: "open-tx",
+      deployableTokenA: 1n,
+      deployableTokenB: 1n
+    }));
+
+    const harness = createHarness(
+      createState({
+        pendingRebalance: createPending({ phase: "opening" }),
+        inFlightRebalance: true
+      }),
+      {
+        openCenteredPosition
+      }
+    );
+    vi.spyOn(harness.service as any, "sleep").mockResolvedValue(undefined);
+    harness.setLivePosition("old-position");
+
+    await harness.service.runCycle("run");
+
+    expect(harness.orcaClient.closePosition).toHaveBeenCalledWith("old-position", true, expect.any(Number));
+    expect(openCenteredPosition).toHaveBeenCalledTimes(1);
+    expect((harness.orcaClient.closePosition as any).mock.invocationCallOrder[0]).toBeLessThan(
+      openCenteredPosition.mock.invocationCallOrder[0]
+    );
+    expect(harness.getState().activePositionMint).toBe("new-position");
+  });
+
+  it("pauses instead of adopting a timeout-opened position while the previous one is still live", async () => {
+    let openAttempted = false;
+    const openCenteredPosition = vi.fn(async () => {
+      openAttempted = true;
+      throw new TransactionTimeoutError("opening", { plannedPositionMint: "new-position" });
+    });
+    const findManagedPosition = vi.fn(async (positionMint?: string) => {
+      if (positionMint === "new-position" && openAttempted) {
+        return {
+          positionAddress: positionMint,
+          positionMint,
+          whirlpoolAddress: "whirlpool",
+          liquidity: 1n,
+          raw: {}
+        };
+      }
+
+      if (positionMint === "old-position" && openAttempted) {
+        return {
+          positionAddress: positionMint,
+          positionMint,
+          whirlpoolAddress: "whirlpool",
+          liquidity: 1n,
+          raw: {}
+        };
+      }
+
+      return null;
+    });
+
+    const harness = createHarness(
+      createState({
+        pendingRebalance: createPending({ phase: "opening", retryCount: 0 }),
+        inFlightRebalance: true
+      }),
+      {
+        openCenteredPosition,
+        findManagedPosition
+      }
+    );
+    vi.spyOn(harness.service as any, "sleep").mockResolvedValue(undefined);
+
+    await harness.service.runCycle("run");
+
+    expect(harness.getState().paused).toBe(true);
+    expect(harness.getState().pauseReason).toContain("Previous position is still live after opening timeout");
+    expect(harness.getState().pendingRebalance?.phase).toBe("opening");
   });
 
   it("rebalances again instead of pausing when open sizing leaves one side undeployable", async () => {

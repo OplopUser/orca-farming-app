@@ -3,220 +3,174 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Orca Multi-Bot Control</title>
+    <title>Orca LP Bot Dashboard</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <main class="shell">
-      <section class="panel hero">
-        <p class="eyebrow">Shared Wallet Supervisor</p>
-        <h1>Orca Multi-Bot Control Panel</h1>
-        <p class="lede">Create separate LP bots, assign each one an allocation, and manage every rebalance loop from one local dashboard.</p>
-      </section>
-
-      <section class="panel wallet-card">
-        <div class="section-head">
-          <div>
-            <p class="eyebrow">Wallet Summary</p>
-            <h2>Shared Wallet</h2>
-          </div>
+      <header class="topbar">
+        <div class="topbar-left">
+          <h1>Orca LP Dashboard</h1>
           <span id="queueBadge" class="badge idle">Queue 0</span>
         </div>
-        <dl class="wallet-grid">
-          <div>
-            <dt>Wallet Address</dt>
-            <dd id="walletAddress">-</dd>
-          </div>
-          <div>
-            <dt>Enabled Bots</dt>
-            <dd id="enabledBots">-</dd>
-          </div>
-          <div>
-            <dt>Monitoring Bots</dt>
-            <dd id="monitoringBots">-</dd>
-          </div>
-          <div>
-            <dt>Total Allocation</dt>
-            <dd id="allocationValue">-</dd>
-          </div>
-          <div>
-            <dt>Wallet Token A</dt>
-            <dd id="walletTokenA">-</dd>
-          </div>
-          <div>
-            <dt>Wallet Token B</dt>
-            <dd id="walletTokenB">-</dd>
-          </div>
-        </dl>
-      </section>
-
-      <section class="panel pnl-card">
-        <div class="section-head">
-          <div>
-            <p class="eyebrow">PnL Summary</p>
-            <h2>Bot-Tracked Performance</h2>
-          </div>
+        <div class="topbar-right">
+          <span class="topbar-wallet" id="walletAddress">-</span>
         </div>
-        <dl class="wallet-grid">
-          <div>
-            <dt>All-In Net PnL</dt>
-            <dd id="totalPnlValue" class="metric-value flat">-</dd>
-          </div>
-          <div>
-            <dt>Realized Net PnL</dt>
-            <dd id="realizedPnlValue" class="metric-value flat">-</dd>
-          </div>
-          <div>
-            <dt>Open Net PnL</dt>
-            <dd id="openPnlValue" class="metric-value flat">-</dd>
-          </div>
-          <div>
-            <dt>Fees Earned</dt>
-            <dd id="feesEarnedValue" class="metric-value flat">-</dd>
-          </div>
-          <div>
-            <dt>Open Positions</dt>
-            <dd id="openPositionsValue">-</dd>
-          </div>
-          <div>
-            <dt>Closed Positions</dt>
-            <dd id="closedPositionsValue">-</dd>
-          </div>
-        </dl>
-        <p id="orphanWarning" class="warning-note" hidden></p>
-      </section>
+      </header>
 
-      <section class="panel create-card">
-        <div class="section-head">
-          <div>
-            <p class="eyebrow">Create Bot</p>
-            <h2>New Bot</h2>
-          </div>
+      <div class="kpi-row">
+        <div class="kpi-card kpi-primary">
+          <span class="kpi-label">PnL</span>
+          <span id="formulaPnlValue" class="kpi-value flat">-</span>
         </div>
-        <form id="createBotForm" class="create-form">
-          <label>
-            <span>Name</span>
-            <input id="nameInput" name="name" placeholder="SOL Mean Recenter" required />
-          </label>
-          <label class="wide">
-            <span>Platform</span>
-            <select id="platformInput" name="platform">
-              <option value="orca">Orca Whirlpool</option>
-              <option value="meteora">Meteora DLMM</option>
-            </select>
-          </label>
-          <label class="wide">
-            <span>Pool Address</span>
-            <input id="poolInput" name="whirlpoolAddress" placeholder="Czfq3xZZ..." required />
-          </label>
-          <label>
-            <span>Allocation (USDC value)</span>
-            <input id="allocationInput" name="allocationUsdc" type="number" min="1" step="0.01" value="100" required />
-          </label>
-          <label class="orca-only">
-            <span>LP Range %</span>
-            <input name="rangePct" type="number" min="0.01" step="0.01" value="1" />
-          </label>
-          <label class="meteora-only" hidden>
-            <span>Range Below % (from price)</span>
-            <input name="rangePctBelow" type="number" min="0.01" step="0.01" value="1" />
-          </label>
-          <label class="meteora-only" hidden>
-            <span>Range Above % (from price)</span>
-            <input name="rangePctAbove" type="number" min="0.01" step="0.01" value="1" />
-          </label>
-          <label class="meteora-only" hidden>
-            <span>Liquidity Strategy</span>
-            <select name="meteoraStrategyType">
-              <option value="Spot">Spot (Uniform)</option>
-              <option value="Curve">Curve (Concentrated Center)</option>
-              <option value="BidAsk">Bid-Ask (Concentrated Edges)</option>
-            </select>
-          </label>
-          <label>
-            <span>Rebalance Drift %</span>
-            <input name="rebalanceDriftPct" type="number" min="0.01" step="0.01" value="0.5" required />
-          </label>
-          <label>
-            <span>Poll Seconds</span>
-            <input name="pollSeconds" type="number" min="5" step="1" value="15" required />
-          </label>
-          <label>
-            <span>Max Slippage Bps</span>
-            <input name="maxSlippageBps" type="number" min="1" step="1" value="10" required />
-          </label>
-          <label>
-            <span>Close Retry Bps</span>
-            <input name="closeRetrySlippageBps" type="number" min="1" step="1" value="25" required />
-          </label>
-          <label>
-            <span>Close Final Retry Bps</span>
-            <input name="closeFinalRetrySlippageBps" type="number" min="1" step="1" value="75" required />
-          </label>
-          <label>
-            <span>Open Retry Bps</span>
-            <input name="openRetrySlippageBps" type="number" min="1" step="1" value="25" required />
-          </label>
-          <label>
-            <span>Open Final Retry Bps</span>
-            <input name="openFinalRetrySlippageBps" type="number" min="1" step="1" value="75" required />
-          </label>
-          <label>
-            <span>Open Buffer Bps</span>
-            <input name="openDeploymentBufferBps" type="number" min="0" step="1" value="10" required />
-          </label>
-          <label>
-            <span>Open Retry Buffer Bps</span>
-            <input name="openRetryDeploymentBufferBps" type="number" min="0" step="1" value="25" required />
-          </label>
-          <label>
-            <span>Open Final Buffer Bps</span>
-            <input name="openFinalDeploymentBufferBps" type="number" min="0" step="1" value="50" required />
-          </label>
-          <label>
-            <span>Min Swap Quote Value</span>
-            <input name="minSwapQuoteValue" type="number" min="0" step="0.01" value="1" required />
-          </label>
-          <label>
-            <span>Open Balance Tolerance Bps</span>
-            <input name="openBalanceToleranceBps" type="number" min="0" step="1" value="10" required />
-          </label>
-          <div class="form-actions wide">
-            <button class="play" type="submit">Create Bot</button>
-          </div>
-        </form>
-      </section>
+        <div class="kpi-card">
+          <span class="kpi-label">Total Deposit</span>
+          <span id="totalDepositValue" class="kpi-value">-</span>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-label">Total Withdraw</span>
+          <span id="totalWithdrawValue" class="kpi-value">-</span>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-label">Fees Earned</span>
+          <span id="feesEarnedValue" class="kpi-value flat">-</span>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-label">Realized</span>
+          <span id="realizedPnlValue" class="kpi-value flat">-</span>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-label">Open PnL</span>
+          <span id="openPnlValue" class="kpi-value flat">-</span>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-label">Allocation</span>
+          <span id="allocationValue" class="kpi-value">-</span>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-label">Bots</span>
+          <span class="kpi-value"><span id="enabledBots">-</span> / <span id="monitoringBots">-</span></span>
+        </div>
+      </div>
+
+      <div class="wallet-tokens-row">
+        <span class="token-pill">Token A: <strong id="walletTokenA">-</strong></span>
+        <span class="token-pill">Token B: <strong id="walletTokenB">-</strong></span>
+        <span class="token-pill">Open: <strong id="openPositionsValue">-</strong></span>
+        <span class="token-pill">Closed: <strong id="closedPositionsValue">-</strong></span>
+      </div>
+
+      <p id="orphanWarning" class="warning-note" hidden></p>
 
       <section class="panel bots-card">
         <div class="section-head">
-          <div>
-            <p class="eyebrow">Managed Bots</p>
-            <h2>Bot List</h2>
-          </div>
-        </div>
-        <div id="botsGrid" class="bots-grid">
-          <p class="empty-state">No bots yet.</p>
-        </div>
-      </section>
-
-      <section class="panel bots-card">
-        <div class="section-head">
-          <div>
-            <p class="eyebrow">Active Positions</p>
-            <h2>Active LP Positions</h2>
-          </div>
+          <h2>Active LP Positions</h2>
         </div>
         <div id="activeLpGrid" class="lp-grid">
           <p class="empty-state">No active LP positions.</p>
         </div>
       </section>
 
+      <section class="panel bots-card">
+        <div class="section-head">
+          <h2>Bots</h2>
+        </div>
+        <div id="botsGrid" class="bots-grid">
+          <p class="empty-state">No bots yet.</p>
+        </div>
+      </section>
+
+      <section class="panel create-card">
+        <details class="create-details">
+          <summary class="create-summary"><h2>Create New Bot</h2></summary>
+          <form id="createBotForm" class="create-form">
+            <label>
+              <span>Name</span>
+              <input id="nameInput" name="name" placeholder="SOL Mean Recenter" required />
+            </label>
+            <label class="wide">
+              <span>Pool ID / Whirlpool Address</span>
+              <input id="poolInput" name="whirlpoolAddress" placeholder="Czfq3xZZ..." required />
+            </label>
+            <label>
+              <span>Allocation (USDC)</span>
+              <input id="allocationInput" name="allocationUsdc" type="number" min="1" step="0.01" value="100" required />
+            </label>
+            <label>
+              <span>LP Range %</span>
+              <input name="rangePct" type="number" min="0.01" step="0.01" value="1" required />
+            </label>
+            <label>
+              <span>Drift %</span>
+              <input name="rebalanceDriftPct" type="number" min="0.01" step="0.01" value="0.5" required />
+            </label>
+            <label>
+              <span>Poll (sec)</span>
+              <input name="pollSeconds" type="number" min="5" step="1" value="15" required />
+            </label>
+            <details class="advanced-toggle">
+              <summary>Advanced settings</summary>
+              <div class="advanced-grid">
+                <label>
+                  <span>Max Slippage Bps</span>
+                  <input name="maxSlippageBps" type="number" min="1" step="1" value="100" required />
+                </label>
+                <label>
+                  <span>Close Retry Bps</span>
+                  <input name="closeRetrySlippageBps" type="number" min="1" step="1" value="300" required />
+                </label>
+                <label>
+                  <span>Close Final Bps</span>
+                  <input name="closeFinalRetrySlippageBps" type="number" min="1" step="1" value="1000" required />
+                </label>
+                <label>
+                  <span>Open Retry Bps</span>
+                  <input name="openRetrySlippageBps" type="number" min="1" step="1" value="300" required />
+                </label>
+                <label>
+                  <span>Open Final Bps</span>
+                  <input name="openFinalRetrySlippageBps" type="number" min="1" step="1" value="1000" required />
+                </label>
+                <label>
+                  <span>Open Buffer Bps</span>
+                  <input name="openDeploymentBufferBps" type="number" min="0" step="1" value="100" required />
+                </label>
+                <label>
+                  <span>Open Retry Buffer</span>
+                  <input name="openRetryDeploymentBufferBps" type="number" min="0" step="1" value="300" required />
+                </label>
+                <label>
+                  <span>Open Final Buffer</span>
+                  <input name="openFinalDeploymentBufferBps" type="number" min="0" step="1" value="500" required />
+                </label>
+                <label>
+                  <span>Min Swap Quote</span>
+                  <input name="minSwapQuoteValue" type="number" min="0" step="0.01" value="10" required />
+                </label>
+                <label>
+                  <span>Balance Tolerance Bps</span>
+                  <input name="openBalanceToleranceBps" type="number" min="0" step="1" value="25" required />
+                </label>
+                <label>
+                  <span>Compound Interval (s)</span>
+                  <input name="compoundIntervalSeconds" type="number" min="0" step="1" value="0" required />
+                </label>
+                <label>
+                  <span>Compound Min Value</span>
+                  <input name="compoundMinQuoteValue" type="number" min="0" step="0.01" value="0.5" required />
+                </label>
+              </div>
+            </details>
+            <div class="form-actions wide">
+              <button class="play" type="submit">Create Bot</button>
+            </div>
+          </form>
+        </details>
+      </section>
+
       <section class="panel ledger-card">
         <div class="section-head">
-          <div>
-            <p class="eyebrow">Position Ledger</p>
-            <h2>Open and Closed Positions</h2>
-          </div>
+          <h2>Position Ledger</h2>
         </div>
         <div class="table-shell">
           <table class="ledger-table">
@@ -229,9 +183,9 @@
                 <th>Opened</th>
                 <th>Closed</th>
                 <th>Entry Capital</th>
-                <th>Current / Final Value</th>
+                <th>Current / Final</th>
                 <th>Net PnL</th>
-                <th>Fees Earned / Paid</th>
+                <th>Fees / Costs</th>
               </tr>
             </thead>
             <tbody id="pnlPositionsBody">
@@ -245,10 +199,7 @@
 
       <section class="panel ledger-card">
         <div class="section-head">
-          <div>
-            <p class="eyebrow">Transaction History</p>
-            <h2>All Bots</h2>
-          </div>
+          <h2>Transactions</h2>
         </div>
         <div class="table-filters">
           <label>
@@ -271,7 +222,7 @@
           </label>
           <label class="search-filter">
             <span>Search</span>
-            <input id="searchFilter" type="search" placeholder="Tx id or summary" />
+            <input id="searchFilter" type="search" placeholder="Tx id or summary..." />
           </label>
         </div>
         <div class="table-shell">

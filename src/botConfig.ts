@@ -7,8 +7,6 @@ export function buildBotConfig(baseConfig: AppConfig, bot: BotDefinition): AppCo
     ORCA_WHIRLPOOL_ADDRESS: bot.whirlpoolAddress,
     BOT_ALLOCATION_USDC: bot.allocationUsdc,
     RANGE_PCT: bot.rangePct,
-    RANGE_PCT_BELOW: bot.rangePctBelow ?? bot.rangePct,
-    RANGE_PCT_ABOVE: bot.rangePctAbove ?? bot.rangePct,
     REBALANCE_DRIFT_PCT: bot.rebalanceDriftPct,
     POLL_SECONDS: bot.pollSeconds,
     MAX_SLIPPAGE_BPS: bot.maxSlippageBps,
@@ -16,6 +14,7 @@ export function buildBotConfig(baseConfig: AppConfig, bot: BotDefinition): AppCo
     CLOSE_FINAL_RETRY_SLIPPAGE_BPS: bot.closeFinalRetrySlippageBps,
     OPEN_RETRY_SLIPPAGE_BPS: bot.openRetrySlippageBps,
     OPEN_FINAL_RETRY_SLIPPAGE_BPS: bot.openFinalRetrySlippageBps,
+    SLIPPAGE_RETRIES_PER_TIER: bot.slippageRetriesPerTier,
     OPEN_DEPLOYMENT_BUFFER_BPS: bot.openDeploymentBufferBps,
     OPEN_RETRY_DEPLOYMENT_BUFFER_BPS: bot.openRetryDeploymentBufferBps,
     OPEN_FINAL_DEPLOYMENT_BUFFER_BPS: bot.openFinalDeploymentBufferBps,
@@ -27,7 +26,10 @@ export function buildBotConfig(baseConfig: AppConfig, bot: BotDefinition): AppCo
     TOKEN_B_MINT: bot.tokenBMint,
     TOKEN_B_SYMBOL: bot.tokenBSymbol,
     TOKEN_B_DECIMALS: bot.tokenBDecimals,
-    BOT_PLATFORM: bot.platform,
-    METEORA_STRATEGY_TYPE: bot.meteoraStrategyType ?? "Spot"
+    COMPOUND_INTERVAL_SECONDS: bot.compoundIntervalSeconds,
+    COMPOUND_MIN_QUOTE_VALUE: bot.compoundMinQuoteValue,
+    DRIFT_CONFIRM_POLLS: bot.driftConfirmPolls,
+    REBALANCE_MIN_BENEFIT_MULTIPLE: bot.rebalanceMinBenefitMultiple,
+    HARVEST_MIN_BENEFIT_MULTIPLE: bot.harvestMinBenefitMultiple
   };
 }

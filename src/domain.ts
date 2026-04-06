@@ -1,10 +1,8 @@
 export type DriftDirection = "below" | "above";
 export type DriftStatus = "waiting" | "triggered";
-export type RebalancePhase = "closing" | "swapping" | "opening";
+export type RebalancePhase = "closing" | "swapping" | "opening" | "harvesting" | "compounding";
 export type BotId = string;
 export type PositionPnlStatus = "open" | "closed";
-export type BotPlatform = "orca" | "meteora";
-export type MeteoraStrategyType = "Spot" | "Curve" | "BidAsk";
 
 export interface PendingRebalance {
   phase: RebalancePhase;
@@ -46,6 +44,9 @@ export interface BotState {
   pendingRebalance: PendingRebalance | null;
   positionLowerPrice: number | null;
   positionUpperPrice: number | null;
+  lastCompoundAt: string | null;
+  totalCompoundCount: number;
+  consecutiveDriftPolls: number;
 }
 
 export interface BotRuntimeState extends BotState {
@@ -58,15 +59,9 @@ export interface BotDefinition {
   name: string;
   enabled: boolean;
   archived: boolean;
-  platform: BotPlatform;
   whirlpoolAddress: string;
   allocationUsdc: number;
-  /** Symmetric ±% range for Orca bots */
   rangePct: number;
-  /** % below current price for Meteora bots (asymmetric lower bound) */
-  rangePctBelow?: number;
-  /** % above current price for Meteora bots (asymmetric upper bound) */
-  rangePctAbove?: number;
   rebalanceDriftPct: number;
   pollSeconds: number;
   maxSlippageBps: number;
@@ -74,6 +69,7 @@ export interface BotDefinition {
   closeFinalRetrySlippageBps: number;
   openRetrySlippageBps: number;
   openFinalRetrySlippageBps: number;
+  slippageRetriesPerTier: number;
   openDeploymentBufferBps: number;
   openRetryDeploymentBufferBps: number;
   openFinalDeploymentBufferBps: number;
@@ -85,10 +81,11 @@ export interface BotDefinition {
   tokenBMint: string;
   tokenBSymbol: string;
   tokenBDecimals: number;
-  /** Meteora only: liquidity distribution strategy */
-  meteoraStrategyType?: MeteoraStrategyType;
-  /** Meteora only: pool bin step in bps (discovered, informational) */
-  meteoraBinStep?: number;
+  compoundIntervalSeconds: number;
+  compoundMinQuoteValue: number;
+  driftConfirmPolls: number;
+  rebalanceMinBenefitMultiple: number;
+  harvestMinBenefitMultiple: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -129,9 +126,6 @@ export interface PoolMetadata {
   tokenBMint: string;
   tokenBSymbol: string;
   tokenBDecimals: number;
-  platform: BotPlatform;
-  /** Meteora only: pool bin step in bps */
-  binStep?: number;
 }
 
 export interface PoolSnapshot {
@@ -142,9 +136,6 @@ export interface PoolSnapshot {
   tokenADecimals: number;
   tokenBDecimals: number;
   raw: unknown;
-  platform: BotPlatform;
-  /** Meteora only: current active bin ID */
-  activeBinId?: number;
 }
 
 export interface WalletBalances {
@@ -199,6 +190,7 @@ export interface PositionLedgerOpenInput {
   lowerPrice: number | null;
   upperPrice: number | null;
   entryCapitalQuote: number;
+  initialGrossValueQuote?: number;
   entryTokenA: string;
   entryTokenB: string;
   residualTokenA: string;
@@ -233,6 +225,19 @@ export interface PositionLedgerMarkInput {
   grossTokenB: string;
 }
 
+export interface PositionLedgerCompoundInput {
+  botId: BotId;
+  positionMint: string;
+  compoundedAt: string;
+  centerPrice: number;
+  harvestedFeeA: string;
+  harvestedFeeB: string;
+  harvestedValueQuote: number;
+  harvestTxId: string | null;
+  compoundTxId: string | null;
+  txFeeLamports: number;
+}
+
 export interface PositionPnlRecord {
   id: string;
   botId: BotId;
@@ -262,6 +267,8 @@ export interface PositionPnlRecord {
   openTxId: string | null;
   closeTxId: string | null;
   bootstrapped: boolean;
+  cumulativeCompoundedFeesUsdc: number;
+  compoundCount: number;
 }
 
 export interface PositionPnlLedger {
@@ -284,6 +291,9 @@ export interface GlobalPnlSummary {
   realizedNetPnlUsdc: number;
   openNetPnlUsdc: number;
   feesEarnedUsdc: number;
+  totalDepositUsdc: number;
+  totalWithdrawUsdc: number;
+  formulaPnlUsdc: number;
   openPositionCount: number;
   closedPositionCount: number;
   orphanedPositionCount: number;

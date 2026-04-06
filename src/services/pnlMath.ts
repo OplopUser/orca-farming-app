@@ -31,11 +31,9 @@ export function lamportsToUsdc(lamports: number, solUsdc: number) {
 
 export function computeNetPnl(
   grossValueUsdc: number,
-  entryCapitalUsdc: number,
-  cumulativeSwapFeesUsdc: number,
-  cumulativeTxFeesUsdc: number
+  entryCapitalUsdc: number
 ) {
-  return grossValueUsdc - entryCapitalUsdc - cumulativeSwapFeesUsdc - cumulativeTxFeesUsdc;
+  return grossValueUsdc - entryCapitalUsdc;
 }
 
 export function summarizeBotPnl(
@@ -87,11 +85,21 @@ export function summarizeGlobalPnl(
     .reduce((sum, record) => sum + (record.status === "closed" ? (record.realizedNetPnlUsdc ?? 0) : (record.latestNetPnlUsdc ?? 0)), 0);
   const feesEarnedUsdc = records.reduce((sum, record) => sum + (record.feesEarnedUsdc ?? 0), 0);
 
+  const totalDepositUsdc = records.reduce((sum, record) => sum + (record.entryCapitalUsdc ?? 0), 0);
+  const totalWithdrawUsdc = records.reduce((sum, record) => {
+    if (record.status === "closed") return sum + (record.exitGrossValueUsdc ?? 0);
+    return sum + (record.latestGrossValueUsdc ?? 0);
+  }, 0);
+  const formulaPnlUsdc = totalWithdrawUsdc - totalDepositUsdc;
+
   return {
     totalNetPnlUsdc: openNetPnlUsdc + realizedNetPnlUsdc,
     realizedNetPnlUsdc,
     openNetPnlUsdc,
     feesEarnedUsdc,
+    totalDepositUsdc,
+    totalWithdrawUsdc,
+    formulaPnlUsdc,
     openPositionCount: records.filter((record) => record.status === "open" && (!activePositionMints || activePositionMints.has(record.positionMint))).length,
     closedPositionCount: records.filter((record) =>
       record.status === "closed" ||

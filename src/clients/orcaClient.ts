@@ -22,6 +22,8 @@ interface WhirlpoolSdkModule {
   swap: (...args: unknown[]) => Promise<any>;
   openConcentratedPosition?: (...args: unknown[]) => Promise<any>;
   openPositionInstructions?: (...args: unknown[]) => Promise<any>;
+  harvestPositionInstructions?: (...args: unknown[]) => Promise<any>;
+  increaseLiquidityInstructions?: (...args: unknown[]) => Promise<any>;
   setRpc?: (...args: unknown[]) => void;
   setPayerFromBytes?: (...args: unknown[]) => Promise<any>;
   setWhirlpoolsConfig?: (...args: unknown[]) => Promise<void>;
@@ -235,8 +237,7 @@ export class OrcaClient implements PlatformClient {
       tokenBMint: this.config.TOKEN_B_MINT,
       tokenADecimals: this.config.TOKEN_A_DECIMALS,
       tokenBDecimals: this.config.TOKEN_B_DECIMALS,
-      raw: pool,
-      platform: "orca" as const
+      raw: pool
     };
   }
 
@@ -263,8 +264,7 @@ export class OrcaClient implements PlatformClient {
       tokenADecimals,
       tokenBDecimals,
       tokenASymbol: this.inferTokenSymbol(tokenAMint),
-      tokenBSymbol: this.inferTokenSymbol(tokenBMint),
-      platform: "orca" as const
+      tokenBSymbol: this.inferTokenSymbol(tokenBMint)
     };
   }
 
@@ -365,6 +365,81 @@ export class OrcaClient implements PlatformClient {
       const txId = await this.sendFromResult(result, "closing", { positionMint });
       this.positionCache = null;
       return { dryRun: false, quote: result, txId };
+    });
+  }
+
+  async harvestFees(positionMint: string) {
+    await this.init();
+    if (!this.sdk?.harvestPositionInstructions || !this.sdk.getPayer || !this.txSender?.buildAndSendTransaction) {
+      throw new Error("Installed Orca SDK does not expose the harvest position flow");
+    }
+
+    const harvestPositionInstructions = this.sdk.harvestPositionInstructions;
+    const getPayer = this.sdk.getPayer;
+    const buildAndSendTransaction = this.txSender.buildAndSendTransaction;
+
+    return this.withRpcFailover(async () => {
+      const result = await harvestPositionInstructions(
+        this.rpc,
+        this.toAddress(positionMint),
+        getPayer()
+      );
+
+      const feesQuote = {
+        feeOwedA: BigInt(result?.feesQuote?.feeOwedA ?? 0),
+        feeOwedB: BigInt(result?.feesQuote?.feeOwedB ?? 0)
+      };
+
+      const txId = await this.sendWithConfirmationTimeout(
+        async () => this.normalizeTxId(
+          await buildAndSendTransaction(
+            result.instructions,
+            getPayer(),
+            undefined,
+            "confirmed"
+          )
+        ),
+        "harvesting",
+        { positionMint }
+      );
+      this.positionCache = null;
+      return { feesQuote, txId };
+    });
+  }
+
+  async increaseLiquidity(positionMint: string, tokenMaxA: bigint, tokenMaxB: bigint, slippageBps = this.config.MAX_SLIPPAGE_BPS) {
+    await this.init();
+    if (!this.sdk?.increaseLiquidityInstructions || !this.sdk.getPayer || !this.txSender?.buildAndSendTransaction) {
+      throw new Error("Installed Orca SDK does not expose the increase liquidity flow");
+    }
+
+    const increaseLiquidityInstructions = this.sdk.increaseLiquidityInstructions;
+    const getPayer = this.sdk.getPayer;
+    const buildAndSendTransaction = this.txSender.buildAndSendTransaction;
+
+    return this.withRpcFailover(async () => {
+      const result = await increaseLiquidityInstructions(
+        this.rpc,
+        this.toAddress(positionMint),
+        { tokenMaxA, tokenMaxB },
+        slippageBps,
+        getPayer()
+      );
+
+      const txId = await this.sendWithConfirmationTimeout(
+        async () => this.normalizeTxId(
+          await buildAndSendTransaction(
+            result.instructions,
+            getPayer(),
+            undefined,
+            "confirmed"
+          )
+        ),
+        "compounding",
+        { positionMint }
+      );
+      this.positionCache = null;
+      return { txId };
     });
   }
 

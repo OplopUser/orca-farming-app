@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 
 import type { Logger } from "pino";
 
-import type { BotRecord, BotDefinition, GlobalPnlSummary, PositionLedgerCloseInput, PositionLedgerMarkInput, PositionLedgerOpenInput, PositionPnlRecord, BotPnlSummary } from "../domain.js";
-import type { PlatformClient } from "../clients/platformClient.js";
+import type { BotRecord, BotDefinition, GlobalPnlSummary, PositionLedgerCloseInput, PositionLedgerCompoundInput, PositionLedgerMarkInput, PositionLedgerOpenInput, PositionPnlRecord, BotPnlSummary } from "../domain.js";
+import { OrcaClient } from "../clients/orcaClient.js";
 import { PnlLedgerStore } from "../state/pnlLedgerStore.js";
 import {
   computeNetPnl,
@@ -14,6 +14,7 @@ import {
   summarizeBotPnl,
   summarizeGlobalPnl
 } from "./pnlMath.js";
+import { computeTargetValueWeights, toBaseUnits } from "../strategy/bands.js";
 
 export interface PnlDashboardSnapshot {
   summary: GlobalPnlSummary;
@@ -61,7 +62,7 @@ export class PositionPnlService {
       entryCenterPrice: input.centerPrice,
       entryLowerPrice: input.lowerPrice,
       entryUpperPrice: input.upperPrice,
-      entryCapitalUsdc: input.entryCapitalQuote * prices.tokenBUsdc,
+      entryCapitalUsdc: (input.initialGrossValueQuote ?? input.entryCapitalQuote) * prices.tokenBUsdc,
       entryTokenA: input.entryTokenA,
       entryTokenB: input.entryTokenB,
       residualTokenA: input.residualTokenA,
@@ -69,19 +70,16 @@ export class PositionPnlService {
       cumulativeSwapFeesUsdc: input.cumulativeSwapFeeQuote * prices.tokenBUsdc,
       cumulativeTxFeesUsdc: lamportsToUsdc(input.cumulativeTxFeeLamports, prices.solUsdc),
       feesEarnedUsdc: 0,
-      latestGrossValueUsdc: input.entryCapitalQuote * prices.tokenBUsdc,
-      latestNetPnlUsdc: computeNetPnl(
-        input.entryCapitalQuote * prices.tokenBUsdc,
-        input.entryCapitalQuote * prices.tokenBUsdc,
-        input.cumulativeSwapFeeQuote * prices.tokenBUsdc,
-        lamportsToUsdc(input.cumulativeTxFeeLamports, prices.solUsdc)
-      ),
+      latestGrossValueUsdc: (input.initialGrossValueQuote ?? input.entryCapitalQuote) * prices.tokenBUsdc,
+      latestNetPnlUsdc: 0,
       lastMarkedAt: input.openedAt,
       exitGrossValueUsdc: null,
       realizedNetPnlUsdc: null,
       openTxId: input.openTxId,
       closeTxId: null,
-      bootstrapped: Boolean(input.bootstrapped)
+      bootstrapped: Boolean(input.bootstrapped),
+      cumulativeCompoundedFeesUsdc: 0,
+      compoundCount: 0
     };
 
     const existingOpen = await this.ledgerStore.getOpenRecordByBotId(bot.id);
@@ -137,26 +135,22 @@ export class PositionPnlService {
         realizedNetPnlUsdc: -closeTxFeesUsdc,
         openTxId: null,
         closeTxId: input.closeTxId,
-        bootstrapped: true
+        bootstrapped: true,
+        cumulativeCompoundedFeesUsdc: 0,
+        compoundCount: 0
       };
       await this.ledgerStore.saveRecord(bootstrapped);
       return;
     }
 
     this.repairQuoteNativeUsdRecord(record, input.exitGrossQuote, prices);
-    this.repairCorruptedClosedBasis(record, input, exitGrossValueUsdc);
 
     record.status = "closed";
     record.closedAt = input.closedAt;
     record.cumulativeTxFeesUsdc += closeTxFeesUsdc;
     record.feesEarnedUsdc = input.feesEarnedQuote * prices.tokenBUsdc;
     record.latestGrossValueUsdc = exitGrossValueUsdc;
-    record.latestNetPnlUsdc = computeNetPnl(
-      exitGrossValueUsdc,
-      record.entryCapitalUsdc,
-      record.cumulativeSwapFeesUsdc,
-      record.cumulativeTxFeesUsdc
-    );
+    record.latestNetPnlUsdc = computeNetPnl(exitGrossValueUsdc, record.entryCapitalUsdc);
     record.lastMarkedAt = input.closedAt;
     record.exitGrossValueUsdc = exitGrossValueUsdc;
     record.realizedNetPnlUsdc = record.latestNetPnlUsdc;
@@ -165,29 +159,7 @@ export class PositionPnlService {
     await this.ledgerStore.saveRecord(record);
   }
 
-  private repairCorruptedClosedBasis(
-    record: PositionPnlRecord,
-    input: PositionLedgerCloseInput,
-    exitGrossValueUsdc: number
-  ) {
-    const entryTokenA = this.parseBigInt(record.entryTokenA);
-    const entryTokenB = this.parseBigInt(record.entryTokenB);
-    const oneSidedEntry = (entryTokenA <= 0n && entryTokenB > 0n) || (entryTokenB <= 0n && entryTokenA > 0n);
-    const distortedBasis =
-      !Number.isFinite(record.entryCapitalUsdc) ||
-      record.entryCapitalUsdc <= 0 ||
-      Math.abs(record.entryCapitalUsdc - exitGrossValueUsdc) / exitGrossValueUsdc > 0.25;
-
-    if (!oneSidedEntry || !distortedBasis) {
-      return;
-    }
-
-    record.entryCapitalUsdc = exitGrossValueUsdc;
-    record.entryTokenA = input.exitTokenA;
-    record.entryTokenB = input.exitTokenB;
-  }
-
-  async markOpenPosition(bot: BotDefinition, bots: BotRecord[], client: PlatformClient, input: PositionLedgerMarkInput) {
+  async markOpenPosition(bot: BotDefinition, bots: BotRecord[], client: OrcaClient, input: PositionLedgerMarkInput) {
     let record = await this.ledgerStore.getRecordByPositionMint(input.positionMint);
     const prices = await this.resolveTokenPrices(bot, bots, input.centerPrice);
     if (!prices) {
@@ -232,16 +204,17 @@ export class PositionPnlService {
         realizedNetPnlUsdc: null,
         openTxId: null,
         closeTxId: null,
-        bootstrapped: true
+        bootstrapped: true,
+        cumulativeCompoundedFeesUsdc: 0,
+        compoundCount: 0
       };
     }
 
     this.repairQuoteNativeUsdRecord(record, input.grossValueQuote, prices);
     await this.repairOpenTransactionBasis(record, bot, prices);
-    this.repairInconsistentOpenBasis(record, bot, prices);
 
     const latestGrossValueUsdc = input.grossValueQuote * prices.tokenBUsdc;
-    this.repairCorruptedOpenBasis(record, input, latestGrossValueUsdc);
+
     if (
       record.bootstrapped &&
       !record.openTxId &&
@@ -257,41 +230,33 @@ export class PositionPnlService {
 
     record.feesEarnedUsdc = input.feesEarnedQuote * prices.tokenBUsdc;
     record.latestGrossValueUsdc = latestGrossValueUsdc;
-    record.latestNetPnlUsdc = computeNetPnl(
-      latestGrossValueUsdc,
-      record.entryCapitalUsdc,
-      record.cumulativeSwapFeesUsdc,
-      record.cumulativeTxFeesUsdc
-    );
+    record.latestNetPnlUsdc = computeNetPnl(latestGrossValueUsdc, record.entryCapitalUsdc);
     record.lastMarkedAt = input.markedAt;
 
     await this.ledgerStore.saveRecord(record);
   }
 
-  private repairCorruptedOpenBasis(
-    record: PositionPnlRecord,
-    input: PositionLedgerMarkInput,
-    latestGrossValueUsdc: number
-  ) {
-    if (record.status !== "open" || !Number.isFinite(latestGrossValueUsdc) || latestGrossValueUsdc <= 0) {
+  async recordPositionCompounded(bot: BotDefinition, bots: BotRecord[], input: PositionLedgerCompoundInput) {
+    const record = await this.ledgerStore.getRecordByPositionMint(input.positionMint);
+    if (!record || record.status !== "open") {
+      this.logger.warn({ botId: bot.id, positionMint: input.positionMint }, "skipping compound pnl record — no open position found");
       return;
     }
 
-    const entryTokenA = this.parseBigInt(record.entryTokenA);
-    const entryTokenB = this.parseBigInt(record.entryTokenB);
-    const oneSidedEntry = (entryTokenA <= 0n && entryTokenB > 0n) || (entryTokenB <= 0n && entryTokenA > 0n);
-    const distortedBasis =
-      !Number.isFinite(record.entryCapitalUsdc) ||
-      record.entryCapitalUsdc <= 0 ||
-      Math.abs(record.entryCapitalUsdc - latestGrossValueUsdc) / latestGrossValueUsdc > 0.25;
-
-    if (!oneSidedEntry || !distortedBasis) {
+    const prices = await this.resolveTokenPrices(bot, bots, input.centerPrice);
+    if (!prices) {
+      this.logger.warn({ botId: bot.id, positionMint: input.positionMint }, "skipping compound pnl record — token prices could not be resolved");
       return;
     }
 
-    record.entryCapitalUsdc = latestGrossValueUsdc;
-    record.entryTokenA = input.grossTokenA;
-    record.entryTokenB = input.grossTokenB;
+    const compoundedValueUsdc = input.harvestedValueQuote * prices.tokenBUsdc;
+    record.cumulativeCompoundedFeesUsdc = (record.cumulativeCompoundedFeesUsdc ?? 0) + compoundedValueUsdc;
+    record.compoundCount = (record.compoundCount ?? 0) + 1;
+    record.entryCapitalUsdc += compoundedValueUsdc;
+    record.cumulativeTxFeesUsdc += lamportsToUsdc(input.txFeeLamports, prices.solUsdc);
+    record.lastMarkedAt = input.compoundedAt;
+
+    await this.ledgerStore.saveRecord(record);
   }
 
   private async repairOpenTransactionBasis(
@@ -299,23 +264,28 @@ export class PositionPnlService {
     bot: BotDefinition,
     prices: TokenPricesUsdc
   ) {
-    if (record.status !== "open" || !record.openTxId || !this.resolveOpenTransactionDebits) {
+    // Only repair bootstrapped positions (no LP open quote was captured at open time).
+    // For normal opens, entryCapitalUsdc comes from the LP close quote immediately after
+    // opening, which is reliable. On-chain debits for LP opens may include the full WSOL
+    // wallet balance (residuals returned as native SOL are not reflected as a credit),
+    // so using them for non-bootstrapped positions inflates entry capital by residual amount.
+    if (record.status !== "open" || !record.openTxId || !this.resolveOpenTransactionDebits || !record.bootstrapped) {
       return;
     }
 
     try {
       const debits = await this.resolveOpenTransactionDebits(bot, record.openTxId);
-      if (!debits || debits.tokenA <= 0n || debits.tokenB <= 0n) {
+      if (!debits || (debits.tokenA <= 0n && debits.tokenB <= 0n)) {
         return;
       }
 
-      const expectedEntryCapitalUsdc = quoteValueFromRaw(
-        record.entryCenterPrice,
+      const expectedEntryCapitalUsdc = this.estimateEntryCapitalUsdcFromOpenDebits(
+        record,
+        bot,
+        prices,
         debits.tokenA,
-        debits.tokenB,
-        bot.tokenADecimals,
-        bot.tokenBDecimals
-      ) * prices.tokenBUsdc;
+        debits.tokenB
+      );
 
       if (!Number.isFinite(expectedEntryCapitalUsdc) || expectedEntryCapitalUsdc <= 0) {
         return;
@@ -324,16 +294,17 @@ export class PositionPnlService {
       const recordedTokenA = this.parseBigInt(record.entryTokenA);
       const recordedTokenB = this.parseBigInt(record.entryTokenB);
       const tokenMismatch =
-        recordedTokenA !== debits.tokenA ||
-        recordedTokenB !== debits.tokenB;
+        (debits.tokenA > 0n && recordedTokenA !== debits.tokenA) ||
+        (debits.tokenB > 0n && recordedTokenB !== debits.tokenB);
       const basisDelta = Math.abs(record.entryCapitalUsdc - expectedEntryCapitalUsdc) / expectedEntryCapitalUsdc;
 
       if (!tokenMismatch && basisDelta <= 0.01) {
         return;
       }
 
-      record.entryTokenA = debits.tokenA.toString();
-      record.entryTokenB = debits.tokenB.toString();
+      const inferredTokens = this.estimateEntryTokensFromCapital(record, bot, prices, expectedEntryCapitalUsdc);
+      record.entryTokenA = (debits.tokenA > 0n ? debits.tokenA : inferredTokens.tokenA).toString();
+      record.entryTokenB = (debits.tokenB > 0n ? debits.tokenB : inferredTokens.tokenB).toString();
       record.entryCapitalUsdc = expectedEntryCapitalUsdc;
     } catch (error) {
       this.logger.warn(
@@ -391,53 +362,9 @@ export class PositionPnlService {
     if (record.realizedNetPnlUsdc != null) {
       record.realizedNetPnlUsdc = computeNetPnl(
         record.exitGrossValueUsdc ?? record.latestGrossValueUsdc ?? record.entryCapitalUsdc,
-        record.entryCapitalUsdc,
-        record.cumulativeSwapFeesUsdc,
-        record.cumulativeTxFeesUsdc
+        record.entryCapitalUsdc
       );
     }
-  }
-
-  private repairInconsistentOpenBasis(
-    record: PositionPnlRecord,
-    bot: BotDefinition,
-    prices: TokenPricesUsdc
-  ) {
-    if (record.status !== "open" || !Number.isFinite(record.entryCenterPrice) || record.entryCenterPrice <= 0) {
-      return;
-    }
-
-    let entryTokenA: bigint;
-    let entryTokenB: bigint;
-    try {
-      entryTokenA = BigInt(record.entryTokenA);
-      entryTokenB = BigInt(record.entryTokenB);
-    } catch {
-      return;
-    }
-
-    if (entryTokenA <= 0n && entryTokenB <= 0n) {
-      return;
-    }
-
-    const expectedEntryCapitalUsdc = quoteValueFromRaw(
-      record.entryCenterPrice,
-      entryTokenA,
-      entryTokenB,
-      bot.tokenADecimals,
-      bot.tokenBDecimals
-    ) * prices.tokenBUsdc;
-
-    if (!Number.isFinite(expectedEntryCapitalUsdc) || expectedEntryCapitalUsdc <= 0) {
-      return;
-    }
-
-    const basisDelta = Math.abs(record.entryCapitalUsdc - expectedEntryCapitalUsdc) / expectedEntryCapitalUsdc;
-    if (basisDelta <= 0.5) {
-      return;
-    }
-
-    record.entryCapitalUsdc = expectedEntryCapitalUsdc;
   }
 
   private parseBigInt(value: string) {
@@ -448,9 +375,121 @@ export class PositionPnlService {
     }
   }
 
+  private estimateEntryCapitalUsdcFromOpenDebits(
+    record: PositionPnlRecord,
+    bot: BotDefinition,
+    prices: TokenPricesUsdc,
+    tokenA: bigint,
+    tokenB: bigint
+  ) {
+    if (tokenA > 0n && tokenB > 0n) {
+      return quoteValueFromRaw(
+        record.entryCenterPrice,
+        tokenA,
+        tokenB,
+        bot.tokenADecimals,
+        bot.tokenBDecimals
+      ) * prices.tokenBUsdc;
+    }
+
+    const weights = this.getEntryTargetWeights(record);
+    if (!weights) {
+      return 0;
+    }
+
+    if (tokenA > 0n && weights.tokenA > 0) {
+      const tokenAValueUsdc = quoteValueFromRaw(
+        record.entryCenterPrice,
+        tokenA,
+        0n,
+        bot.tokenADecimals,
+        bot.tokenBDecimals
+      ) * prices.tokenBUsdc;
+      return tokenAValueUsdc / weights.tokenA;
+    }
+
+    if (tokenB > 0n && weights.tokenB > 0) {
+      const tokenBValueUsdc = quoteValueFromRaw(
+        record.entryCenterPrice,
+        0n,
+        tokenB,
+        bot.tokenADecimals,
+        bot.tokenBDecimals
+      ) * prices.tokenBUsdc;
+      return tokenBValueUsdc / weights.tokenB;
+    }
+
+    return 0;
+  }
+
+  private estimateEntryTokensFromCapital(
+    record: PositionPnlRecord,
+    bot: BotDefinition,
+    prices: TokenPricesUsdc,
+    entryCapitalUsdc: number
+  ) {
+    const weights = this.getEntryTargetWeights(record);
+    if (!weights || !Number.isFinite(entryCapitalUsdc) || entryCapitalUsdc <= 0 || prices.tokenBUsdc <= 0) {
+      return { tokenA: 0n, tokenB: 0n };
+    }
+
+    const totalQuote = entryCapitalUsdc / prices.tokenBUsdc;
+    const tokenAQuote = totalQuote * weights.tokenA;
+    const tokenBQuote = totalQuote * weights.tokenB;
+
+    return {
+      tokenA: toBaseUnits(tokenAQuote / record.entryCenterPrice, bot.tokenADecimals),
+      tokenB: toBaseUnits(tokenBQuote, bot.tokenBDecimals)
+    };
+  }
+
+  private getEntryTargetWeights(record: PositionPnlRecord) {
+    if (
+      !Number.isFinite(record.entryLowerPrice) ||
+      !Number.isFinite(record.entryCenterPrice) ||
+      !Number.isFinite(record.entryUpperPrice) ||
+      !record.entryLowerPrice ||
+      !record.entryCenterPrice ||
+      !record.entryUpperPrice
+    ) {
+      return null;
+    }
+
+    return computeTargetValueWeights(
+      record.entryLowerPrice,
+      record.entryCenterPrice,
+      record.entryUpperPrice
+    );
+  }
+
   async getDashboardSnapshot(bots: BotRecord[], livePositionMints: string[]): Promise<PnlDashboardSnapshot> {
-    const positions = await this.ledgerStore.listRecords();
-    // Build the set of position mints actively managed by enabled, non-archived bots
+    let positions = await this.ledgerStore.listRecords();
+    const livePositionMintSet = new Set(livePositionMints);
+    const runtimePositionMints = new Set<string>(
+      bots
+        .map((bot) => bot.runtime.activePositionMint)
+        .filter((positionMint): positionMint is string => Boolean(positionMint))
+    );
+    const staleOpenRecords = positions
+      .filter((record) =>
+        record.status === "open" &&
+        !livePositionMintSet.has(record.positionMint) &&
+        !runtimePositionMints.has(record.positionMint)
+      )
+      .map((record) => ({
+        ...record,
+        status: "closed" as const,
+        closedAt: record.closedAt ?? record.lastMarkedAt ?? record.openedAt,
+        exitGrossValueUsdc: record.exitGrossValueUsdc ?? record.latestGrossValueUsdc,
+        realizedNetPnlUsdc: record.realizedNetPnlUsdc ?? record.latestNetPnlUsdc,
+        closeTxId: record.closeTxId ?? "reconciled-missing-on-chain"
+      }));
+
+    if (staleOpenRecords.length > 0) {
+      await this.ledgerStore.saveMany(staleOpenRecords);
+      positions = await this.ledgerStore.listRecords();
+    }
+
     const activePositionMints = new Set<string>(
       bots
         .filter((bot) => bot.definition.enabled && !bot.definition.archived && bot.runtime.activePositionMint)

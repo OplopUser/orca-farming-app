@@ -26,18 +26,23 @@ function createBotRecord(overrides: Partial<BotRecord> = {}): BotRecord {
       closeFinalRetrySlippageBps: 1000,
       openRetrySlippageBps: 300,
       openFinalRetrySlippageBps: 1000,
+      slippageRetriesPerTier: 3,
       openDeploymentBufferBps: 100,
       openRetryDeploymentBufferBps: 300,
       openFinalDeploymentBufferBps: 500,
       minSwapQuoteValue: 10,
       openBalanceToleranceBps: 25,
+      compoundIntervalSeconds: 0,
+      compoundMinQuoteValue: 0.5,
+      driftConfirmPolls: 2,
+      rebalanceMinBenefitMultiple: 1.5,
+      harvestMinBenefitMultiple: 2.0,
       tokenAMint: "So11111111111111111111111111111111111111112",
       tokenASymbol: "SOL",
       tokenADecimals: 9,
       tokenBMint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
       tokenBSymbol: "USDC",
       tokenBDecimals: 6,
-      platform: "orca" as const,
       createdAt: "2026-03-14T00:00:00.000Z",
       updatedAt: "2026-03-14T00:00:00.000Z"
     },
@@ -51,8 +56,8 @@ function createBotRecord(overrides: Partial<BotRecord> = {}): BotRecord {
 }
 
 describe("pnl math", () => {
-  it("computes open net pnl after swap and tx fees", () => {
-    expect(computeNetPnl(110, 100, 3, 2)).toBe(5);
+  it("computes net pnl as gross value minus entry capital", () => {
+    expect(computeNetPnl(110, 100)).toBe(10);
   });
 
   it("resolves token prices through a SOL/USDC reference bot", () => {
@@ -127,13 +132,15 @@ describe("pnl math", () => {
         cumulativeTxFeesUsdc: 1,
         feesEarnedUsdc: 3,
         latestGrossValueUsdc: 110,
-        latestNetPnlUsdc: 8,
+        latestNetPnlUsdc: 10,
         lastMarkedAt: "2026-03-14T00:00:00.000Z",
         exitGrossValueUsdc: null,
         realizedNetPnlUsdc: null,
         openTxId: null,
         closeTxId: null,
-        bootstrapped: false
+        bootstrapped: false,
+        cumulativeCompoundedFeesUsdc: 0,
+        compoundCount: 0
       },
       {
         id: "two",
@@ -157,20 +164,22 @@ describe("pnl math", () => {
         cumulativeTxFeesUsdc: 2,
         feesEarnedUsdc: 4,
         latestGrossValueUsdc: 115,
-        latestNetPnlUsdc: 12,
+        latestNetPnlUsdc: 15,
         lastMarkedAt: "2026-03-14T00:00:00.000Z",
         exitGrossValueUsdc: 115,
-        realizedNetPnlUsdc: 12,
+        realizedNetPnlUsdc: 15,
         openTxId: null,
         closeTxId: null,
-        bootstrapped: false
+        bootstrapped: false,
+        cumulativeCompoundedFeesUsdc: 0,
+        compoundCount: 0
       }
     ];
 
     const summary = summarizeGlobalPnl(records, 1);
-    expect(summary.totalNetPnlUsdc).toBe(20);
-    expect(summary.realizedNetPnlUsdc).toBe(12);
-    expect(summary.openNetPnlUsdc).toBe(8);
+    expect(summary.totalNetPnlUsdc).toBe(25);
+    expect(summary.realizedNetPnlUsdc).toBe(15);
+    expect(summary.openNetPnlUsdc).toBe(10);
     expect(summary.orphanedPositionCount).toBe(1);
   });
 });

@@ -29,6 +29,7 @@ function createConfig(root: string): AppConfig {
     CLOSE_FINAL_RETRY_SLIPPAGE_BPS: 1000,
     OPEN_RETRY_SLIPPAGE_BPS: 300,
     OPEN_FINAL_RETRY_SLIPPAGE_BPS: 1000,
+    SLIPPAGE_RETRIES_PER_TIER: 3,
     OPEN_DEPLOYMENT_BUFFER_BPS: 100,
     OPEN_RETRY_DEPLOYMENT_BUFFER_BPS: 300,
     OPEN_FINAL_DEPLOYMENT_BUFFER_BPS: 500,
@@ -41,12 +42,13 @@ function createConfig(root: string): AppConfig {
     TOKEN_B_MINT: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
     TOKEN_B_SYMBOL: "USDC",
     TOKEN_B_DECIMALS: 6,
+    COMPOUND_INTERVAL_SECONDS: 0,
+    COMPOUND_MIN_QUOTE_VALUE: 0.5,
+    DRIFT_CONFIRM_POLLS: 2,
+    REBALANCE_MIN_BENEFIT_MULTIPLE: 1.5,
+    HARVEST_MIN_BENEFIT_MULTIPLE: 2.0,
     maxSlippageFraction: 0.01,
     solanaRpcUrls: ["https://rpc.example", "https://api.mainnet-beta.solana.com"],
-    RANGE_PCT_BELOW: 1,
-    RANGE_PCT_ABOVE: 1,
-    BOT_PLATFORM: "orca",
-    METEORA_STRATEGY_TYPE: "Spot"
   };
 }
 
@@ -69,11 +71,17 @@ describe("BotRegistryStore", () => {
         closeFinalRetrySlippageBps: 1000,
         openRetrySlippageBps: 300,
         openFinalRetrySlippageBps: 1000,
+        slippageRetriesPerTier: 3,
         openDeploymentBufferBps: 100,
         openRetryDeploymentBufferBps: 300,
         openFinalDeploymentBufferBps: 500,
         minSwapQuoteValue: 10,
-        openBalanceToleranceBps: 25
+        openBalanceToleranceBps: 25,
+        compoundIntervalSeconds: 0,
+        compoundMinQuoteValue: 0.5,
+        driftConfirmPolls: 2,
+        rebalanceMinBenefitMultiple: 1.5,
+        harvestMinBenefitMultiple: 2.0
       },
       {
         whirlpoolAddress: "pool-1",
@@ -82,8 +90,7 @@ describe("BotRegistryStore", () => {
         tokenADecimals: 9,
         tokenBMint: "mint-b",
         tokenBSymbol: "USDC",
-        tokenBDecimals: 6,
-        platform: "orca" as const
+        tokenBDecimals: 6
       }
     );
 

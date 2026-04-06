@@ -6,11 +6,9 @@ import type { AppConfig } from "../config.js";
 import type {
   BotDefinition,
   BotId,
-  BotPlatform,
   BotRecord,
   BotRegistry,
   BotRuntimeState,
-  MeteoraStrategyType,
   PoolMetadata
 } from "../domain.js";
 import { createEmptyBotRuntimeState } from "./store.js";
@@ -22,8 +20,6 @@ export interface CreateBotInput {
   whirlpoolAddress: string;
   allocationUsdc: number;
   rangePct: number;
-  rangePctBelow?: number;
-  rangePctAbove?: number;
   rebalanceDriftPct: number;
   pollSeconds: number;
   maxSlippageBps: number;
@@ -31,13 +27,17 @@ export interface CreateBotInput {
   closeFinalRetrySlippageBps: number;
   openRetrySlippageBps: number;
   openFinalRetrySlippageBps: number;
+  slippageRetriesPerTier: number;
   openDeploymentBufferBps: number;
   openRetryDeploymentBufferBps: number;
   openFinalDeploymentBufferBps: number;
   minSwapQuoteValue: number;
   openBalanceToleranceBps: number;
-  platform?: BotPlatform;
-  meteoraStrategyType?: MeteoraStrategyType;
+  compoundIntervalSeconds: number;
+  compoundMinQuoteValue: number;
+  driftConfirmPolls: number;
+  rebalanceMinBenefitMultiple: number;
+  harvestMinBenefitMultiple: number;
 }
 
 export interface UpdateBotInput extends Partial<CreateBotInput> {
@@ -72,18 +72,23 @@ function createDefinitionFromConfig(config: AppConfig, botId: string, now: strin
     closeFinalRetrySlippageBps: config.CLOSE_FINAL_RETRY_SLIPPAGE_BPS,
     openRetrySlippageBps: config.OPEN_RETRY_SLIPPAGE_BPS,
     openFinalRetrySlippageBps: config.OPEN_FINAL_RETRY_SLIPPAGE_BPS,
+    slippageRetriesPerTier: config.SLIPPAGE_RETRIES_PER_TIER,
     openDeploymentBufferBps: config.OPEN_DEPLOYMENT_BUFFER_BPS,
     openRetryDeploymentBufferBps: config.OPEN_RETRY_DEPLOYMENT_BUFFER_BPS,
     openFinalDeploymentBufferBps: config.OPEN_FINAL_DEPLOYMENT_BUFFER_BPS,
     minSwapQuoteValue: config.MIN_SWAP_USDC,
     openBalanceToleranceBps: config.OPEN_BALANCE_TOLERANCE_BPS,
+    compoundIntervalSeconds: config.COMPOUND_INTERVAL_SECONDS,
+    compoundMinQuoteValue: config.COMPOUND_MIN_QUOTE_VALUE,
+    driftConfirmPolls: config.DRIFT_CONFIRM_POLLS,
+    rebalanceMinBenefitMultiple: config.REBALANCE_MIN_BENEFIT_MULTIPLE,
+    harvestMinBenefitMultiple: config.HARVEST_MIN_BENEFIT_MULTIPLE,
     tokenAMint: config.TOKEN_A_MINT,
     tokenASymbol: config.TOKEN_A_SYMBOL,
     tokenADecimals: config.TOKEN_A_DECIMALS,
     tokenBMint: config.TOKEN_B_MINT,
     tokenBSymbol: config.TOKEN_B_SYMBOL,
     tokenBDecimals: config.TOKEN_B_DECIMALS,
-    platform: "orca" as BotPlatform,
     createdAt: now,
     updatedAt: now
   };
@@ -160,22 +165,23 @@ export class BotRegistryStore {
           closeFinalRetrySlippageBps: input.closeFinalRetrySlippageBps,
           openRetrySlippageBps: input.openRetrySlippageBps,
           openFinalRetrySlippageBps: input.openFinalRetrySlippageBps,
+          slippageRetriesPerTier: input.slippageRetriesPerTier,
           openDeploymentBufferBps: input.openDeploymentBufferBps,
           openRetryDeploymentBufferBps: input.openRetryDeploymentBufferBps,
           openFinalDeploymentBufferBps: input.openFinalDeploymentBufferBps,
           minSwapQuoteValue: input.minSwapQuoteValue,
           openBalanceToleranceBps: input.openBalanceToleranceBps,
+          compoundIntervalSeconds: input.compoundIntervalSeconds,
+          compoundMinQuoteValue: input.compoundMinQuoteValue,
+          driftConfirmPolls: input.driftConfirmPolls,
+          rebalanceMinBenefitMultiple: input.rebalanceMinBenefitMultiple,
+          harvestMinBenefitMultiple: input.harvestMinBenefitMultiple,
           tokenAMint: metadata.tokenAMint,
           tokenASymbol: metadata.tokenASymbol,
           tokenADecimals: metadata.tokenADecimals,
           tokenBMint: metadata.tokenBMint,
           tokenBSymbol: metadata.tokenBSymbol,
           tokenBDecimals: metadata.tokenBDecimals,
-          platform: input.platform ?? "orca",
-          rangePctBelow: input.rangePctBelow,
-          rangePctAbove: input.rangePctAbove,
-          meteoraStrategyType: input.meteoraStrategyType,
-          meteoraBinStep: metadata.binStep,
           createdAt: now,
           updatedAt: now
         },
@@ -237,6 +243,9 @@ export class BotRegistryStore {
       if (typeof input.openFinalRetrySlippageBps === "number") {
         nextDefinition.openFinalRetrySlippageBps = input.openFinalRetrySlippageBps;
       }
+      if (typeof input.slippageRetriesPerTier === "number") {
+        nextDefinition.slippageRetriesPerTier = input.slippageRetriesPerTier;
+      }
       if (typeof input.openDeploymentBufferBps === "number") {
         nextDefinition.openDeploymentBufferBps = input.openDeploymentBufferBps;
       }
@@ -251,6 +260,21 @@ export class BotRegistryStore {
       }
       if (typeof input.openBalanceToleranceBps === "number") {
         nextDefinition.openBalanceToleranceBps = input.openBalanceToleranceBps;
+      }
+      if (typeof input.compoundIntervalSeconds === "number") {
+        nextDefinition.compoundIntervalSeconds = input.compoundIntervalSeconds;
+      }
+      if (typeof input.compoundMinQuoteValue === "number") {
+        nextDefinition.compoundMinQuoteValue = input.compoundMinQuoteValue;
+      }
+      if (typeof input.driftConfirmPolls === "number") {
+        nextDefinition.driftConfirmPolls = input.driftConfirmPolls;
+      }
+      if (typeof input.rebalanceMinBenefitMultiple === "number") {
+        nextDefinition.rebalanceMinBenefitMultiple = input.rebalanceMinBenefitMultiple;
+      }
+      if (typeof input.harvestMinBenefitMultiple === "number") {
+        nextDefinition.harvestMinBenefitMultiple = input.harvestMinBenefitMultiple;
       }
       nextDefinition.updatedAt = now;
 

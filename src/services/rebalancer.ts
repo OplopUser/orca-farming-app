@@ -9,6 +9,7 @@ import {
   type BotRuntimeState,
   type PendingRebalance,
   type PositionLedgerCloseInput,
+  type PositionLedgerCompoundInput,
   type PositionLedgerMarkInput,
   type PositionLedgerOpenInput,
   type RebalancePhase,
@@ -26,8 +27,7 @@ import {
 } from "./recovery.js";
 import { computeBand, computeTargetValueWeights, evaluateDriftTrigger, fromBaseUnits, toBaseUnits } from "../strategy/bands.js";
 import { describeCloseQuote } from "./positionPnlService.js";
-import { InsufficientAllocationError } from "../clients/orcaClient.js";
-import type { PlatformClient } from "../clients/platformClient.js";
+import { InsufficientAllocationError, OrcaClient } from "../clients/orcaClient.js";
 
 export type RunMode = "run" | "dry-run" | "rebalance-now";
 
@@ -45,6 +45,7 @@ interface RebalancerOptions {
   onPositionOpened?: (input: PositionLedgerOpenInput) => Promise<void>;
   onPositionClosed?: (input: PositionLedgerCloseInput) => Promise<void>;
   onPositionMarked?: (input: PositionLedgerMarkInput) => Promise<void>;
+  onPositionCompounded?: (input: PositionLedgerCompoundInput) => Promise<void>;
 }
 
 class AllocationQuoteBudgetUnavailableError extends Error {
@@ -63,7 +64,7 @@ export class RebalancerService {
   private static readonly PNL_MARK_INTERVAL_MS = 60_000;
   private static readonly TOKEN_MIN_SUBCEEDED_CODE = "6018";
   private static readonly OPEN_SLIPPAGE_ERROR_CODE = "6012";
-  private static readonly MAX_TIMEOUT_RETRIES = 1;
+  private static readonly MAX_TIMEOUT_RETRIES = 3;
   private static readonly MAX_STRICT_PREOPEN_SWAPS = 4;
   private static readonly MAX_OPEN_FAILURE_PREOPEN_SWAPS = 8;
   private static readonly MIN_STRICT_PREOPEN_SWAP_QUOTE = 0.01;
@@ -81,7 +82,7 @@ export class RebalancerService {
     private readonly config: AppConfig,
     private readonly logger: Logger,
     private readonly stateStore: RuntimeStateStore,
-    private readonly client: PlatformClient,
+    private readonly orcaClient: OrcaClient,
     private readonly options: RebalancerOptions = {}
   ) {
     this.accountReader = new RpcAccountReader(config.solanaRpcUrls);
@@ -100,7 +101,7 @@ export class RebalancerService {
   }
 
   async runCycle(mode: RunMode): Promise<void> {
-    this.client.clearPositionCache();
+    this.orcaClient.clearPositionCache();
     const state = await this.stateStore.load();
     if (state.pendingRebalance) {
       this.normalizePendingRebalance(state.pendingRebalance);
@@ -132,13 +133,13 @@ export class RebalancerService {
       return;
     }
 
-    const pool = await this.client.fetchPoolSnapshot();
+    const pool = await this.orcaClient.fetchPoolSnapshot();
     state.lastObservedPrice = pool.currentPrice;
     state.lastOraclePrice = null;
     state.lastOracleAt = null;
 
     if (state.activePositionMint) {
-      const livePosition = await this.client.findManagedPosition(state.activePositionMint);
+      const livePosition = await this.orcaClient.findManagedPosition(state.activePositionMint);
       if (!livePosition) {
         this.logger.warn(
           {
@@ -165,7 +166,46 @@ export class RebalancerService {
     const isOutOfActualRange =
       (state.positionLowerPrice !== null && pool.currentPrice < state.positionLowerPrice) ||
       (state.positionUpperPrice !== null && pool.currentPrice > state.positionUpperPrice);
-    const shouldRebalance = mode === "rebalance-now" ? true : drift.shouldRebalance || wasTriggered || isOutOfActualRange;
+
+    // Anti-whipsaw: require consecutive polls outside drift before triggering.
+    // Out-of-range and manual rebalances bypass this filter.
+    const driftDetected = drift.shouldRebalance || isOutOfActualRange;
+    if (driftDetected && !isOutOfActualRange && mode !== "rebalance-now") {
+      state.consecutiveDriftPolls = (state.consecutiveDriftPolls ?? 0) + 1;
+    } else if (!driftDetected) {
+      state.consecutiveDriftPolls = 0;
+    }
+
+    const driftConfirmed = mode === "rebalance-now"
+      || isOutOfActualRange
+      || wasTriggered
+      || (driftDetected && (state.consecutiveDriftPolls ?? 0) >= this.config.DRIFT_CONFIRM_POLLS);
+
+    // Cost/benefit gate: skip rebalance if estimated cost exceeds expected fee benefit.
+    // Bypass for out-of-range (position earning zero fees) and manual rebalances.
+    let shouldRebalance = driftConfirmed;
+    if (shouldRebalance && !isOutOfActualRange && mode !== "rebalance-now" && !wasTriggered) {
+      const allocationQuote = this.config.BOT_ALLOCATION_USDC;
+      const estimatedSwapCostQuote =
+        allocationQuote * this.config.MAX_SLIPPAGE_BPS / 10_000 + 0.005; // swap slippage + ~tx fee
+      // Conservative fee benefit estimate: assume the position earns back the swap cost
+      // over the next N poll intervals before the next rebalance would trigger.
+      // Use a rough APR proxy: (driftPct / rangePct) captures how far price moved relative to band.
+      const driftFraction = Math.abs(pool.currentPrice - baselineCenter) / baselineCenter;
+      const expectedFeeQuote = allocationQuote * driftFraction * 0.5; // half of drift as rough fee proxy
+      if (expectedFeeQuote * this.config.REBALANCE_MIN_BENEFIT_MULTIPLE < estimatedSwapCostQuote) {
+        shouldRebalance = false;
+        this.logger.info(
+          {
+            estimatedSwapCostQuote: estimatedSwapCostQuote.toFixed(4),
+            expectedFeeQuote: expectedFeeQuote.toFixed(4),
+            minBenefitMultiple: this.config.REBALANCE_MIN_BENEFIT_MULTIPLE
+          },
+          "rebalance skipped — cost exceeds expected fee benefit"
+        );
+      }
+    }
+
     state.driftTriggerLower = drift.lowerTrigger;
     state.driftTriggerUpper = drift.upperTrigger;
     state.driftDirection = shouldRebalance
@@ -198,7 +238,7 @@ export class RebalancerService {
       (!state.lastPnlMarkAt || Date.now() - Date.parse(state.lastPnlMarkAt) >= RebalancerService.PNL_MARK_INTERVAL_MS)
     ) {
       try {
-        const markQuote = await this.client.closePosition(state.activePositionMint, false, 0);
+        const markQuote = await this.orcaClient.closePosition(state.activePositionMint, false, 0);
         const markSummary = describeCloseQuote(
           pool.currentPrice,
           markQuote.quote,
@@ -223,6 +263,17 @@ export class RebalancerService {
             error: (error as Error).message
           },
           "pnl mark refresh failed"
+        );
+      }
+    }
+
+    if (state.activePositionMint && this.shouldCompound(state)) {
+      try {
+        await this.runExclusive("trigger", () => this.executeCompound(state, pool.currentPrice));
+      } catch (error) {
+        this.logger.warn(
+          { error: (error as Error).message },
+          "compound attempt failed"
         );
       }
     }
@@ -253,6 +304,225 @@ export class RebalancerService {
     await this.stateStore.save(state);
   }
 
+  async closePositionOnly(): Promise<{ positionMint: string; txId: string | null } | null> {
+    this.orcaClient.clearPositionCache();
+    const state = await this.stateStore.load();
+
+    if (!state.activePositionMint) {
+      this.logger.info("close-position-only: no active position to close");
+      return null;
+    }
+
+    const livePosition = await this.orcaClient.findManagedPosition(state.activePositionMint);
+    if (!livePosition) {
+      this.logger.info({ positionMint: state.activePositionMint }, "close-position-only: position not found on-chain");
+      state.activePositionMint = null;
+      await this.stateStore.save(state);
+      return null;
+    }
+
+    const pool = await this.orcaClient.fetchPoolSnapshot();
+    const positionMint = state.activePositionMint;
+
+    const closeResult = await this.closeManagedPosition(positionMint, true);
+    const closeSummary = await this.inspectTransaction(closeResult.txId);
+    const closeMarkSummary = describeCloseQuote(
+      pool.currentPrice,
+      closeResult.quote,
+      this.config.TOKEN_A_DECIMALS,
+      this.config.TOKEN_B_DECIMALS
+    );
+
+    this.logger.info(
+      {
+        closeTxId: closeResult.txId,
+        closeQuote: closeResult.quote ?? null,
+        closeSummary,
+        positionMint,
+        execute: true,
+        manual: true
+      },
+      "position close evaluated"
+    );
+
+    if (this.options.onPositionClosed) {
+      try {
+        await this.options.onPositionClosed({
+          botId: this.options.botId ?? "legacy",
+          positionMint,
+          closedAt: new Date().toISOString(),
+          centerPrice: pool.currentPrice,
+          exitGrossQuote: closeMarkSummary.grossValueQuote,
+          feesEarnedQuote: closeMarkSummary.feesEarnedQuote,
+          exitTokenA: closeMarkSummary.grossTokenA.toString(),
+          exitTokenB: closeMarkSummary.grossTokenB.toString(),
+          closeTxId: closeResult.txId,
+          closeTxFeeLamports: closeSummary?.feeLamports ?? 0
+        });
+      } catch (error) {
+        this.logger.warn({ error: (error as Error).message }, "manual close pnl update failed");
+      }
+    }
+
+    state.activePositionMint = null;
+    state.driftStatus = null;
+    state.driftDirection = null;
+    state.consecutiveDriftPolls = 0;
+    state.driftTriggerLower = null;
+    state.driftTriggerUpper = null;
+    state.positionLowerPrice = null;
+    state.positionUpperPrice = null;
+    state.latestAction = "position manually closed";
+    await this.stateStore.save(state);
+
+    return { positionMint, txId: closeResult.txId };
+  }
+
+  async compoundNow(): Promise<void> {
+    this.orcaClient.clearPositionCache();
+    const state = await this.stateStore.load();
+
+    if (!state.activePositionMint) {
+      this.logger.info("compound: no active position");
+      return;
+    }
+
+    if (state.pendingRebalance || state.paused) {
+      this.logger.info("compound: skipped (pending rebalance or paused)");
+      return;
+    }
+
+    const pool = await this.orcaClient.fetchPoolSnapshot();
+    await this.executeCompound(state, pool.currentPrice, true);
+  }
+
+  private shouldCompound(state: BotRuntimeState): boolean {
+    if (this.config.COMPOUND_INTERVAL_SECONDS <= 0) return false;
+    if (!state.activePositionMint) return false;
+    if (state.pendingRebalance || state.paused) return false;
+
+    if (state.lastCompoundAt) {
+      const elapsed = Date.now() - Date.parse(state.lastCompoundAt);
+      if (elapsed < this.config.COMPOUND_INTERVAL_SECONDS * 1000) return false;
+    }
+
+    return true;
+  }
+
+  private async executeCompound(state: BotRuntimeState, currentPrice: number, skipMinCheck = false): Promise<void> {
+    const positionMint = state.activePositionMint!;
+
+    const markQuote = await this.orcaClient.closePosition(positionMint, false, 0);
+    const markSummary = describeCloseQuote(
+      currentPrice,
+      markQuote.quote,
+      this.config.TOKEN_A_DECIMALS,
+      this.config.TOKEN_B_DECIMALS
+    );
+
+    if (!skipMinCheck && markSummary.feesEarnedQuote < this.config.COMPOUND_MIN_QUOTE_VALUE) {
+      this.logger.info(
+        {
+          positionMint,
+          feesEarnedQuote: markSummary.feesEarnedQuote,
+          minQuoteValue: this.config.COMPOUND_MIN_QUOTE_VALUE
+        },
+        "compound skipped — accrued fees below minimum"
+      );
+      return;
+    }
+
+    // Harvest cost check: skip if fees earned don't justify the TX cost
+    if (!skipMinCheck && this.config.HARVEST_MIN_BENEFIT_MULTIPLE > 0) {
+      // Estimate harvest TX cost: ~5000 lamports base + ~5000 for increase-liquidity
+      const estimatedHarvestLamports = 10_000;
+      // Convert lamports to quote token value using a rough SOL price estimate.
+      // SOL price ≈ currentPrice when token A is SOL, otherwise use a conservative 150 USD.
+      const solPriceEstimate = this.config.TOKEN_A_MINT === RebalancerService.USDC_MINT ? 1 / currentPrice : currentPrice;
+      const estimatedCostQuote = (estimatedHarvestLamports / 1_000_000_000) * solPriceEstimate;
+      if (markSummary.feesEarnedQuote < estimatedCostQuote * this.config.HARVEST_MIN_BENEFIT_MULTIPLE) {
+        this.logger.info(
+          {
+            positionMint,
+            feesEarnedQuote: markSummary.feesEarnedQuote,
+            estimatedCostQuote: estimatedCostQuote.toFixed(6),
+            minMultiple: this.config.HARVEST_MIN_BENEFIT_MULTIPLE
+          },
+          "compound skipped — fees don't justify harvest TX cost"
+        );
+        return;
+      }
+    }
+
+    this.logger.info(
+      {
+        positionMint,
+        feesEarnedQuote: markSummary.feesEarnedQuote
+      },
+      "compound starting — harvesting fees"
+    );
+
+    const harvestResult = await this.orcaClient.harvestFees(positionMint);
+    const harvestSummary = await this.inspectTransaction(harvestResult.txId);
+    let totalTxFeeLamports = harvestSummary?.feeLamports ?? 0;
+
+    let compoundTxId: string | null = null;
+    const feeA = harvestResult.feesQuote.feeOwedA;
+    const feeB = harvestResult.feesQuote.feeOwedB;
+
+    if (feeA > 0n || feeB > 0n) {
+      try {
+        const increaseResult = await this.orcaClient.increaseLiquidity(positionMint, feeA, feeB);
+        compoundTxId = increaseResult.txId;
+        const increaseSummary = await this.inspectTransaction(compoundTxId);
+        totalTxFeeLamports += increaseSummary?.feeLamports ?? 0;
+      } catch (error) {
+        this.logger.warn(
+          { positionMint, error: (error as Error).message },
+          "compound: increase-liquidity failed — harvested fees remain in wallet"
+        );
+      }
+    }
+
+    const now = new Date().toISOString();
+    state.lastCompoundAt = now;
+    state.totalCompoundCount = (state.totalCompoundCount ?? 0) + 1;
+    state.latestAction = "fees compounded";
+    await this.stateStore.save(state);
+
+    if (this.options.onPositionCompounded) {
+      try {
+        await this.options.onPositionCompounded({
+          botId: this.options.botId ?? "legacy",
+          positionMint,
+          compoundedAt: now,
+          centerPrice: currentPrice,
+          harvestedFeeA: feeA.toString(),
+          harvestedFeeB: feeB.toString(),
+          harvestedValueQuote: markSummary.feesEarnedQuote,
+          harvestTxId: harvestResult.txId,
+          compoundTxId,
+          txFeeLamports: totalTxFeeLamports
+        });
+      } catch (error) {
+        this.logger.warn({ error: (error as Error).message }, "compound pnl update failed");
+      }
+    }
+
+    this.logger.info(
+      {
+        positionMint,
+        harvestTxId: harvestResult.txId,
+        compoundTxId,
+        feeA: feeA.toString(),
+        feeB: feeB.toString(),
+        feesValueQuote: markSummary.feesEarnedQuote,
+        txFeeLamports: totalTxFeeLamports
+      },
+      "compound completed"
+    );
+  }
+
   private async executeRebalance(mode: RunMode, state: BotRuntimeState, currentPrice: number): Promise<void> {
     if (state.pendingRebalance) {
       await this.reconcilePendingRebalance(state);
@@ -270,7 +540,7 @@ export class RebalancerService {
     }
 
     const existingPosition = state.activePositionMint
-      ? await this.client.findManagedPosition(state.activePositionMint)
+      ? await this.orcaClient.findManagedPosition(state.activePositionMint)
       : null;
 
     state.pendingRebalance = {
@@ -334,9 +604,9 @@ export class RebalancerService {
 
   private async executeDryRunRebalance(state: BotRuntimeState, currentPrice: number) {
     const existingPosition = state.activePositionMint
-      ? await this.client.findManagedPosition(state.activePositionMint)
+      ? await this.orcaClient.findManagedPosition(state.activePositionMint)
       : null;
-    let balances = await this.client.getWalletBalances();
+    let balances = await this.orcaClient.getWalletBalances();
     let closeTxId: string | null = null;
     let swapTxId: string | null = null;
     let openTxId: string | null = null;
@@ -357,16 +627,15 @@ export class RebalancerService {
         "position close evaluated"
       );
 
-      const closeQuote = closeResult.quote as any;
       balances = {
-        tokenA: balances.tokenA + BigInt(closeQuote?.quote?.tokenMinA ?? 0),
-        tokenB: balances.tokenB + BigInt(closeQuote?.quote?.tokenMinB ?? 0)
+        tokenA: balances.tokenA + BigInt(closeResult.quote?.quote?.tokenMinA ?? 0),
+        tokenB: balances.tokenB + BigInt(closeResult.quote?.quote?.tokenMinB ?? 0)
       };
     }
 
     balances = await this.capBalancesToAllocation(currentPrice, balances);
 
-    const swapResult = await this.client.swapToTarget(
+    const swapResult = await this.orcaClient.swapToTarget(
       currentPrice,
       balances.tokenA,
       balances.tokenB,
@@ -385,7 +654,7 @@ export class RebalancerService {
       "swap plan evaluated"
     );
 
-    const openResult = await this.client.openCenteredPosition(
+    const openResult = await this.orcaClient.openCenteredPosition(
       currentPrice,
       balances.tokenA,
       balances.tokenB,
@@ -430,7 +699,7 @@ export class RebalancerService {
     }
 
     const livePosition = state.activePositionMint
-      ? await this.client.findManagedPosition(state.activePositionMint)
+      ? await this.orcaClient.findManagedPosition(state.activePositionMint)
       : null;
     let phase: RebalancePhase = "closing";
     let plannedPositionMint: string | null = null;
@@ -526,7 +795,7 @@ export class RebalancerService {
       return;
     }
 
-    const livePosition = await this.client.findManagedPosition(pending.previousPositionMint);
+    const livePosition = await this.orcaClient.findManagedPosition(pending.previousPositionMint);
     if (!livePosition) {
       await this.advancePendingPhase(state, "swapping", "position already closed on-chain");
       return;
@@ -601,7 +870,7 @@ export class RebalancerService {
       return;
     }
 
-    const owner = this.client.getOwnerAddress();
+    const owner = this.orcaClient.getOwnerAddress();
     let balancesBeforeSwap = pending.previousPositionMint
       ? await this.waitForPostCloseBalances(owner, pending.previousPositionMint, 0n, 0n)
       : await this.accountReader.getWalletBalances(owner, this.config.TOKEN_A_MINT, this.config.TOKEN_B_MINT);
@@ -630,7 +899,7 @@ export class RebalancerService {
         return;
       }
 
-      const swapResult = await this.client.swapToTarget(
+      const swapResult = await this.orcaClient.swapToTarget(
         pending.targetCenterPrice,
         balancesBeforeSwap.tokenA,
         balancesBeforeSwap.tokenB,
@@ -662,7 +931,7 @@ export class RebalancerService {
           tokenA: balancesBeforeSwap.tokenA.toString(),
           tokenB: balancesBeforeSwap.tokenB.toString(),
           entryCapitalQuote: pending.entryCapitalQuote,
-          swapAssessment: this.client.assessSwapToTarget(
+          swapAssessment: this.orcaClient.assessSwapToTarget(
             pending.targetCenterPrice,
             balancesBeforeSwap.tokenA,
             balancesBeforeSwap.tokenB
@@ -700,9 +969,33 @@ export class RebalancerService {
       return;
     }
 
+    const previousStillLive = pending.previousPositionMint
+      ? await this.orcaClient.findManagedPosition(pending.previousPositionMint)
+      : null;
+    if (previousStillLive) {
+      pending.phase = "closing";
+      pending.plannedPositionMint = null;
+      pending.nextRetryAt = null;
+      pending.recoveryReason = "Previous position is still live on-chain; retrying close before opening a replacement";
+      state.latestAction = "previous position still open; retrying close before opening";
+      await this.stateStore.save(state);
+
+      this.logger.warn(
+        {
+          phase: "opening",
+          previousPositionMint: pending.previousPositionMint
+        },
+        "refusing to open a replacement while the previous position is still live"
+      );
+      return;
+    }
+
     try {
-      let balances = await this.client.getWalletBalances();
-      balances = await this.fundWalletForAllocationIfNeeded(state, pending, balances, "opening");
+      let walletBalances = await this.orcaClient.getWalletBalances();
+      walletBalances = await this.fundWalletForAllocationIfNeeded(state, pending, walletBalances, "opening");
+      const preOpenWalletBalances = walletBalances;
+
+      let balances = walletBalances;
 
       balances = await this.capBalancesToAllocation(
         pending.targetCenterPrice,
@@ -738,7 +1031,7 @@ export class RebalancerService {
       pending.plannedPositionMint = openResult.positionMint;
       pending.lastKnownOpenTxId = openResult.txId;
       const openSummary = await this.inspectTransaction(openResult.txId);
-      const postOpenBalances = await this.waitForPostOpenBalances(balances);
+      const postOpenBalances = await this.waitForPostOpenBalances(preOpenWalletBalances);
       let openedGrossValueQuote = this.quoteValue(
         pending.targetCenterPrice,
         openResult.deployableTokenA,
@@ -748,20 +1041,12 @@ export class RebalancerService {
       let openedGrossTokenB = openResult.deployableTokenB;
       let residualTokenA = postOpenBalances.tokenA;
       let residualTokenB = postOpenBalances.tokenB;
-      const spentTokenA = this.nonNegativeBigInt(balances.tokenA - postOpenBalances.tokenA);
-      const spentTokenB = this.nonNegativeBigInt(balances.tokenB - postOpenBalances.tokenB);
+      const spentTokenA = this.nonNegativeBigInt(preOpenWalletBalances.tokenA - postOpenBalances.tokenA);
+      const spentTokenB = this.nonNegativeBigInt(preOpenWalletBalances.tokenB - postOpenBalances.tokenB);
 
-      if (spentTokenA > 0n || spentTokenB > 0n) {
-        openedGrossTokenA = spentTokenA;
-        openedGrossTokenB = spentTokenB;
-        openedGrossValueQuote = this.quoteValue(
-          pending.targetCenterPrice,
-          openedGrossTokenA,
-          openedGrossTokenB
-        );
-      } else if (openResult.positionMint) {
+      if (openResult.positionMint) {
         try {
-          const openMarkQuote = await this.client.closePosition(openResult.positionMint, false, 0);
+          const openMarkQuote = await this.orcaClient.closePosition(openResult.positionMint, false, 0);
           const openMarkSummary = describeCloseQuote(
             pending.targetCenterPrice,
             openMarkQuote.quote,
@@ -782,6 +1067,16 @@ export class RebalancerService {
         }
       }
 
+      if ((openedGrossTokenA <= 0n && openedGrossTokenB <= 0n) && (spentTokenA > 0n || spentTokenB > 0n)) {
+        openedGrossTokenA = spentTokenA;
+        openedGrossTokenB = spentTokenB;
+        openedGrossValueQuote = this.quoteValue(
+          pending.targetCenterPrice,
+          openedGrossTokenA,
+          openedGrossTokenB
+        );
+      }
+
       if (this.options.onPositionOpened && openResult.positionMint) {
         try {
           await this.options.onPositionOpened({
@@ -794,9 +1089,12 @@ export class RebalancerService {
             centerPrice: pending.targetCenterPrice,
             lowerPrice: openResult.lowerPrice,
             upperPrice: openResult.upperPrice,
-            entryCapitalQuote: openedGrossValueQuote,
-            entryTokenA: openedGrossTokenA.toString(),
-            entryTokenB: openedGrossTokenB.toString(),
+            entryCapitalQuote: (spentTokenA > 0n || spentTokenB > 0n)
+              ? this.quoteValue(pending.targetCenterPrice, spentTokenA, spentTokenB)
+              : openedGrossValueQuote,
+            initialGrossValueQuote: openedGrossValueQuote,
+            entryTokenA: (spentTokenA > 0n ? spentTokenA : openedGrossTokenA).toString(),
+            entryTokenB: (spentTokenB > 0n ? spentTokenB : openedGrossTokenB).toString(),
             residualTokenA: residualTokenA.toString(),
             residualTokenB: residualTokenB.toString(),
             cumulativeSwapFeeQuote: pending.cumulativeSwapFeeQuote,
@@ -855,7 +1153,7 @@ export class RebalancerService {
     await this.stateStore.save(state);
     this.logTimeoutDetected("closing", error, pending);
 
-    const livePosition = await this.client.findManagedPosition(pending.previousPositionMint);
+    const livePosition = await this.orcaClient.findManagedPosition(pending.previousPositionMint);
     const outcome = classifyCloseTimeout(
       pending.previousPositionMint,
       livePosition?.positionMint ?? null
@@ -897,7 +1195,7 @@ export class RebalancerService {
       return false;
     }
 
-    const livePosition = await this.client.findManagedPosition(pending.previousPositionMint);
+    const livePosition = await this.orcaClient.findManagedPosition(pending.previousPositionMint);
     if (livePosition) {
       return false;
     }
@@ -974,7 +1272,7 @@ export class RebalancerService {
     }
 
     const livePosition = pending.previousPositionMint
-      ? await this.client.findManagedPosition(pending.previousPositionMint)
+      ? await this.orcaClient.findManagedPosition(pending.previousPositionMint)
       : null;
 
     if (!livePosition) {
@@ -1096,10 +1394,10 @@ export class RebalancerService {
 
     const balances = await this.capBalancesToAllocation(
       pending.targetCenterPrice,
-      await this.client.getWalletBalances()
+      await this.orcaClient.getWalletBalances()
     );
     const needsSwap =
-      this.client.assessSwapToTarget(
+      this.orcaClient.assessSwapToTarget(
         pending.targetCenterPrice,
         balances.tokenA,
         balances.tokenB
@@ -1150,7 +1448,10 @@ export class RebalancerService {
     this.logTimeoutDetected("opening", error, pending);
 
     const livePosition = pending.plannedPositionMint
-      ? await this.client.findManagedPosition(pending.plannedPositionMint)
+      ? await this.orcaClient.findManagedPosition(pending.plannedPositionMint)
+      : null;
+    const previousStillLive = pending.previousPositionMint
+      ? await this.orcaClient.findManagedPosition(pending.previousPositionMint)
       : null;
 
     const adoptablePosition = livePosition ?? await this.findAdoptableOpenTimeoutPosition(pending);
@@ -1159,6 +1460,15 @@ export class RebalancerService {
         state,
         "opening",
         "Multiple unclaimed positions were found in the target pool after an opening timeout"
+      );
+      return true;
+    }
+
+    if (previousStillLive && adoptablePosition && adoptablePosition.positionMint !== pending.previousPositionMint) {
+      await this.pauseForAmbiguousPhase(
+        state,
+        "opening",
+        "Previous position is still live after opening timeout; refusing to adopt a replacement before close reconciliation"
       );
       return true;
     }
@@ -1180,6 +1490,25 @@ export class RebalancerService {
       "timeout reconciliation evaluated"
     );
 
+    if (previousStillLive && outcome === "retry") {
+      pending.phase = "closing";
+      pending.plannedPositionMint = null;
+      pending.retryCount = 0;
+      pending.nextRetryAt = null;
+      pending.recoveryReason = "Previous position is still live after opening timeout; retrying close before any replacement open";
+      state.latestAction = "previous position still open; retrying close before opening";
+      await this.stateStore.save(state);
+      this.logger.warn(
+        {
+          phase: "opening",
+          previousPositionMint: pending.previousPositionMint,
+          plannedPositionMint: pending.plannedPositionMint
+        },
+        "opening timeout found the previous position still live; returning to close reconciliation"
+      );
+      return true;
+    }
+
     if (outcome === "complete" && adoptablePosition) {
       this.logger.info({ phase: "opening", outcome }, "recovery success");
       if (this.options.onPositionOpened) {
@@ -1189,7 +1518,7 @@ export class RebalancerService {
         let recoveredEntryTokenB = pending.entryTokenB ?? "0";
 
         try {
-          const recoveredOpenQuote = await this.client.closePosition(adoptablePosition.positionMint, false, 0);
+          const recoveredOpenQuote = await this.orcaClient.closePosition(adoptablePosition.positionMint, false, 0);
           const recoveredOpenSummary = describeCloseQuote(
             pending.targetCenterPrice,
             recoveredOpenQuote.quote,
@@ -1246,7 +1575,7 @@ export class RebalancerService {
 
     if (outcome === "retry" && !adoptablePosition) {
       const previousStillLive = pending.previousPositionMint
-        ? await this.client.findManagedPosition(pending.previousPositionMint)
+        ? await this.orcaClient.findManagedPosition(pending.previousPositionMint)
         : null;
 
       if (!previousStillLive) {
@@ -1342,7 +1671,7 @@ export class RebalancerService {
       claimedPositionMints.delete(pending.previousPositionMint);
     }
 
-    const poolPositions = await this.client.listManagedPositions(this.config.ORCA_WHIRLPOOL_ADDRESS);
+    const poolPositions = await this.orcaClient.listManagedPositions(this.config.ORCA_WHIRLPOOL_ADDRESS);
     const candidates = poolPositions.filter((position) => {
       if (!position.positionMint || position.positionMint === pending.previousPositionMint) {
         return false;
@@ -1410,6 +1739,7 @@ export class RebalancerService {
     state.lastRebalanceAt = new Date().toISOString();
     state.driftDirection = null;
     state.driftStatus = "waiting";
+    state.consecutiveDriftPolls = 0;
     state.driftTriggerLower = currentPrice / driftFactor;
     state.driftTriggerUpper = currentPrice * driftFactor;
     state.positionLowerPrice = positionLowerPrice;
@@ -1500,37 +1830,47 @@ export class RebalancerService {
   }
 
   private async closeManagedPosition(positionMint: string, execute: boolean) {
-    const slippageAttempts = [
+    const tiers = [
       this.config.MAX_SLIPPAGE_BPS,
       this.config.CLOSE_RETRY_SLIPPAGE_BPS,
       this.config.CLOSE_FINAL_RETRY_SLIPPAGE_BPS
     ];
+    const retriesPerTier = this.config.SLIPPAGE_RETRIES_PER_TIER;
 
     let lastError: unknown;
 
-    for (let attemptIndex = 0; attemptIndex < slippageAttempts.length; attemptIndex += 1) {
-      const slippageBps = slippageAttempts[attemptIndex];
+    for (let tierIndex = 0; tierIndex < tiers.length; tierIndex += 1) {
+      const slippageBps = tiers[tierIndex];
+      const isLastTier = tierIndex === tiers.length - 1;
 
-      try {
-        return await this.client.closePosition(positionMint, execute, slippageBps);
-      } catch (error) {
-        lastError = error;
-        if (!this.isTokenMinSubceeded(error) || attemptIndex === slippageAttempts.length - 1) {
-          throw error;
+      for (let attempt = 0; attempt < retriesPerTier; attempt += 1) {
+        const isLastAttempt = isLastTier && attempt === retriesPerTier - 1;
+
+        try {
+          return await this.orcaClient.closePosition(positionMint, execute, slippageBps);
+        } catch (error) {
+          lastError = error;
+          if (!this.isTokenMinSubceeded(error) || isLastAttempt) {
+            throw error;
+          }
+
+          const nextTierBps = isLastTier ? null : tiers[tierIndex + 1];
+          const escalating = attempt === retriesPerTier - 1;
+          this.logger.warn(
+            {
+              positionMint,
+              slippageBps,
+              attempt: attempt + 1,
+              retriesPerTier,
+              ...(escalating && nextTierBps != null ? { escalatingToSlippageBps: nextTierBps } : {})
+            },
+            escalating
+              ? "close slippage tier exhausted, escalating to wider tier"
+              : "close quote was too tight, retrying same tier"
+          );
+
+          await this.sleep(1_000);
         }
-
-        const nextSlippageBps = slippageAttempts[attemptIndex + 1];
-        this.logger.warn(
-          {
-            positionMint,
-            attemptedSlippageBps: slippageBps,
-            retrySlippageBps: nextSlippageBps,
-            error: (error as Error).message
-          },
-          "close quote was too tight, retrying with wider slippage"
-        );
-
-        await this.sleep(1_000);
       }
     }
 
@@ -1557,45 +1897,56 @@ export class RebalancerService {
       throw new AllocationQuoteBudgetUnavailableError();
     }
 
-    for (let attemptIndex = 0; attemptIndex < attempts.length; attemptIndex += 1) {
-      const { slippageBps, deploymentBufferBps } = attempts[attemptIndex];
+    const retriesPerTier = this.config.SLIPPAGE_RETRIES_PER_TIER;
 
-      try {
-        return await this.client.openCenteredPosition(
-          currentPrice,
-          tokenA,
-          tokenB,
-          execute,
-          previousPositionMint,
-          slippageBps,
-          deploymentBufferBps,
-          allocationQuoteBudget ?? undefined
-        );
-      } catch (error) {
-        lastError = error;
-        const message = (error as Error).message ?? "";
-        if (
-          (!this.isOpenSlippageError(error) && !this.isRetryableOpenSimulationFailure(message)) ||
-          attemptIndex === attempts.length - 1
-        ) {
-          throw error;
-        }
+    for (let tierIndex = 0; tierIndex < attempts.length; tierIndex += 1) {
+      const { slippageBps, deploymentBufferBps } = attempts[tierIndex];
+      const isLastTier = tierIndex === attempts.length - 1;
 
-        const nextAttempt = attempts[attemptIndex + 1];
-        this.logger.warn(
-          {
+      for (let attempt = 0; attempt < retriesPerTier; attempt += 1) {
+        const isLastAttempt = isLastTier && attempt === retriesPerTier - 1;
+
+        try {
+          return await this.orcaClient.openCenteredPosition(
+            currentPrice,
+            tokenA,
+            tokenB,
+            execute,
             previousPositionMint,
-            openFailureCount,
-            attemptedSlippageBps: slippageBps,
-            attemptedDeploymentBufferBps: deploymentBufferBps,
-            retrySlippageBps: nextAttempt.slippageBps,
-            retryDeploymentBufferBps: nextAttempt.deploymentBufferBps,
-            error: message
-          },
-          "open quote was too tight, retrying with wider slippage and more deployment buffer"
-        );
+            slippageBps,
+            deploymentBufferBps,
+            allocationQuoteBudget ?? undefined
+          );
+        } catch (error) {
+          lastError = error;
+          const message = (error as Error).message ?? "";
+          if (
+            (!this.isOpenSlippageError(error) && !this.isRetryableOpenSimulationFailure(message)) ||
+            isLastAttempt
+          ) {
+            throw error;
+          }
 
-        await this.sleep(1_000);
+          const escalating = attempt === retriesPerTier - 1;
+          const nextAttempt = escalating && !isLastTier ? attempts[tierIndex + 1] : null;
+          this.logger.warn(
+            {
+              previousPositionMint,
+              openFailureCount,
+              slippageBps,
+              deploymentBufferBps,
+              attempt: attempt + 1,
+              retriesPerTier,
+              ...(nextAttempt ? { escalatingToSlippageBps: nextAttempt.slippageBps, escalatingToDeploymentBufferBps: nextAttempt.deploymentBufferBps } : {}),
+              error: message
+            },
+            escalating
+              ? "open slippage tier exhausted, escalating to wider tier"
+              : "open quote was too tight, retrying same tier"
+          );
+
+          await this.sleep(1_000);
+        }
       }
     }
 
@@ -1711,30 +2062,34 @@ export class RebalancerService {
     minimumTokenA: bigint,
     minimumTokenB: bigint
   ) {
-    this.client.clearPositionCache();
-    await this.sleep(2_000);
+    const maxAttempts = 6;
+    const pollMs = RebalancerService.POST_CLOSE_BALANCE_POLL_MS;
 
-    const [balances, livePosition] = await Promise.all([
-      this.accountReader.getWalletBalances(owner, this.config.TOKEN_A_MINT, this.config.TOKEN_B_MINT),
-      this.client.findManagedPosition(closedPositionMint)
-    ]);
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      // Sleep before checking (except first attempt — give the chain a brief moment)
+      this.orcaClient.clearPositionCache();
+      await this.sleep(attempt === 0 ? 500 : pollMs);
 
-    const positionGone = !livePosition || livePosition.positionMint !== closedPositionMint;
-    const balancesReady = balances.tokenA >= minimumTokenA && balances.tokenB >= minimumTokenB;
+      const [balances, livePosition] = await Promise.all([
+        this.accountReader.getWalletBalances(owner, this.config.TOKEN_A_MINT, this.config.TOKEN_B_MINT),
+        this.orcaClient.findManagedPosition(closedPositionMint)
+      ]);
 
-    if (positionGone && balancesReady) {
-      return balances;
+      const positionGone = !livePosition || livePosition.positionMint !== closedPositionMint;
+      const balancesReady = balances.tokenA >= minimumTokenA && balances.tokenB >= minimumTokenB;
+
+      if (positionGone && balancesReady) {
+        return balances;
+      }
     }
 
-    this.client.clearPositionCache();
-    await this.sleep(3_000);
-
+    // Final fallback read after all polling attempts exhausted
     return this.accountReader.getWalletBalances(owner, this.config.TOKEN_A_MINT, this.config.TOKEN_B_MINT);
   }
 
   private async waitForPostOpenBalances(preOpenBalances: WalletBalances) {
     await this.sleep(1_500);
-    let balances = await this.client.getWalletBalances();
+    let balances = await this.orcaClient.getWalletBalances();
     const observedSpend =
       balances.tokenA < preOpenBalances.tokenA ||
       balances.tokenB < preOpenBalances.tokenB;
@@ -1744,7 +2099,7 @@ export class RebalancerService {
     }
 
     await this.sleep(2_000);
-    balances = await this.client.getWalletBalances();
+    balances = await this.orcaClient.getWalletBalances();
     return balances;
   }
 
@@ -1888,7 +2243,7 @@ export class RebalancerService {
     const deploymentBufferBps = nextOpenAttempt?.deploymentBufferBps ?? this.config.OPEN_DEPLOYMENT_BUFFER_BPS;
 
     for (let attemptIndex = 0; attemptIndex < maxAttempts; attemptIndex += 1) {
-      const assessment = this.client.assessSwapToOpenTarget(
+      const assessment = this.orcaClient.assessSwapToOpenTarget(
         pending.targetCenterPrice,
         balances.tokenA,
         balances.tokenB,
@@ -1925,7 +2280,7 @@ export class RebalancerService {
         break;
       }
 
-      const swapResult = await this.client.swapToOpenTarget(
+      const swapResult = await this.orcaClient.swapToOpenTarget(
         pending.targetCenterPrice,
         balances.tokenA,
         balances.tokenB,
@@ -1966,7 +2321,7 @@ export class RebalancerService {
 
       balances = await this.capBalancesToAllocation(
         pending.targetCenterPrice,
-        await this.client.getWalletBalances()
+        await this.orcaClient.getWalletBalances()
       );
     }
 
@@ -2002,7 +2357,7 @@ export class RebalancerService {
       return balances;
     }
 
-    const fundingResult = await this.client.fundQuoteTokenFromWallet(fundingTargetRaw, true);
+    const fundingResult = await this.orcaClient.fundQuoteTokenFromWallet(fundingTargetRaw, true);
     if (fundingResult.txIds.length === 0) {
       this.logger.warn(
         {
@@ -2035,7 +2390,7 @@ export class RebalancerService {
       "wallet funding swap(s) completed before open"
     );
 
-    return await this.client.getWalletBalances();
+    return await this.orcaClient.getWalletBalances();
   }
 
   private async runExclusive<T>(reason: "trigger" | "manual" | "recovery", task: () => Promise<T>): Promise<T> {

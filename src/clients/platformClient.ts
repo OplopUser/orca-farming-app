@@ -1,5 +1,5 @@
 /**
- * PlatformClient — common interface implemented by OrcaClient and MeteoraClient.
+ * PlatformClient — common interface implemented by OrcaClient.
  * The rebalancer and supervisor only ever reference this interface, keeping them
  * platform-agnostic.
  */

@@ -2,7 +2,6 @@ import dotenv from "dotenv";
 import { z } from "zod";
 
 import { normalizeRpcUrls } from "./infra/rpcFailover.js";
-import type { BotPlatform, MeteoraStrategyType } from "./domain.js";
 
 dotenv.config({ override: true });
 
@@ -22,36 +21,34 @@ const envSchema = z.object({
   BOT_ALLOCATION_USDC: z.coerce.number().nonnegative().default(0),
   REBALANCE_DRIFT_PCT: z.coerce.number().positive().default(0.5),
   POLL_SECONDS: z.coerce.number().int().positive().default(15),
-  MAX_SLIPPAGE_BPS: z.coerce.number().int().positive().default(10),
-  CLOSE_RETRY_SLIPPAGE_BPS: z.coerce.number().int().positive().default(25),
-  CLOSE_FINAL_RETRY_SLIPPAGE_BPS: z.coerce.number().int().positive().default(75),
-  OPEN_RETRY_SLIPPAGE_BPS: z.coerce.number().int().positive().default(25),
-  OPEN_FINAL_RETRY_SLIPPAGE_BPS: z.coerce.number().int().positive().default(75),
-  OPEN_DEPLOYMENT_BUFFER_BPS: z.coerce.number().int().min(0).max(9_999).default(10),
-  OPEN_RETRY_DEPLOYMENT_BUFFER_BPS: z.coerce.number().int().min(0).max(9_999).default(25),
-  OPEN_FINAL_DEPLOYMENT_BUFFER_BPS: z.coerce.number().int().min(0).max(9_999).default(50),
+  MAX_SLIPPAGE_BPS: z.coerce.number().int().positive().default(25),
+  CLOSE_RETRY_SLIPPAGE_BPS: z.coerce.number().int().positive().default(50),
+  CLOSE_FINAL_RETRY_SLIPPAGE_BPS: z.coerce.number().int().positive().default(100),
+  OPEN_RETRY_SLIPPAGE_BPS: z.coerce.number().int().positive().default(50),
+  OPEN_FINAL_RETRY_SLIPPAGE_BPS: z.coerce.number().int().positive().default(100),
+  SLIPPAGE_RETRIES_PER_TIER: z.coerce.number().int().positive().default(3),
+  OPEN_DEPLOYMENT_BUFFER_BPS: z.coerce.number().int().min(0).max(9_999).default(50),
+  OPEN_RETRY_DEPLOYMENT_BUFFER_BPS: z.coerce.number().int().min(0).max(9_999).default(150),
+  OPEN_FINAL_DEPLOYMENT_BUFFER_BPS: z.coerce.number().int().min(0).max(9_999).default(300),
   SOL_RESERVE_LAMPORTS: z.coerce.number().int().nonnegative().default(50_000_000),
-  MIN_SWAP_USDC: z.coerce.number().nonnegative().default(1),
-  OPEN_BALANCE_TOLERANCE_BPS: z.coerce.number().int().min(0).max(10_000).default(10),
+  MIN_SWAP_USDC: z.coerce.number().nonnegative().default(10),
+  OPEN_BALANCE_TOLERANCE_BPS: z.coerce.number().int().min(0).max(10_000).default(25),
   TOKEN_A_MINT: z.string().min(1).default("So11111111111111111111111111111111111111112"),
   TOKEN_A_SYMBOL: z.string().min(1).default("SOL"),
   TOKEN_A_DECIMALS: z.coerce.number().int().nonnegative().default(9),
   TOKEN_B_MINT: z.string().min(1).default("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"),
   TOKEN_B_SYMBOL: z.string().min(1).default("USDC"),
-  TOKEN_B_DECIMALS: z.coerce.number().int().nonnegative().default(6)
+  TOKEN_B_DECIMALS: z.coerce.number().int().nonnegative().default(6),
+  COMPOUND_INTERVAL_SECONDS: z.coerce.number().int().nonnegative().default(0),
+  COMPOUND_MIN_QUOTE_VALUE: z.coerce.number().nonnegative().default(0.5),
+  DRIFT_CONFIRM_POLLS: z.coerce.number().int().nonnegative().default(2),
+  REBALANCE_MIN_BENEFIT_MULTIPLE: z.coerce.number().nonnegative().default(1.5),
+  HARVEST_MIN_BENEFIT_MULTIPLE: z.coerce.number().nonnegative().default(2.0)
 });
 
 export type AppConfig = z.infer<typeof envSchema> & {
   maxSlippageFraction: number;
   solanaRpcUrls: string[];
-  /** Meteora: % below current price for the lower bound of the LP range */
-  RANGE_PCT_BELOW: number;
-  /** Meteora: % above current price for the upper bound of the LP range */
-  RANGE_PCT_ABOVE: number;
-  /** Which DEX platform this bot is targeting */
-  BOT_PLATFORM: BotPlatform;
-  /** Meteora liquidity distribution strategy */
-  METEORA_STRATEGY_TYPE: MeteoraStrategyType;
 };
 
 export function loadConfig(): AppConfig {
@@ -63,10 +60,6 @@ export function loadConfig(): AppConfig {
     solanaRpcUrls: normalizeRpcUrls(
       parsed.SOLANA_RPC_URL,
       parsed.SOLANA_RPC_FALLBACK_URLS
-    ),
-    RANGE_PCT_BELOW: parsed.RANGE_PCT,
-    RANGE_PCT_ABOVE: parsed.RANGE_PCT,
-    BOT_PLATFORM: "orca" as BotPlatform,
-    METEORA_STRATEGY_TYPE: "Spot" as MeteoraStrategyType
+    )
   };
 }

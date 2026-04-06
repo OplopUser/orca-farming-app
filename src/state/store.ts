@@ -21,7 +21,10 @@ export const EMPTY_STATE: BotState = {
   driftStatus: null,
   pendingRebalance: null,
   positionLowerPrice: null,
-  positionUpperPrice: null
+  positionUpperPrice: null,
+  lastCompoundAt: null,
+  totalCompoundCount: 0,
+  consecutiveDriftPolls: 0
 };
 
 export function createEmptyBotState(): BotState {

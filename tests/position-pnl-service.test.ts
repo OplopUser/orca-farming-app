@@ -26,18 +26,23 @@ function createBotRecord(overrides: Partial<BotRecord> = {}): BotRecord {
       closeFinalRetrySlippageBps: 1000,
       openRetrySlippageBps: 300,
       openFinalRetrySlippageBps: 1000,
+      slippageRetriesPerTier: 3,
       openDeploymentBufferBps: 100,
       openRetryDeploymentBufferBps: 300,
       openFinalDeploymentBufferBps: 500,
       minSwapQuoteValue: 10,
       openBalanceToleranceBps: 25,
+      compoundIntervalSeconds: 0,
+      compoundMinQuoteValue: 0.5,
+      driftConfirmPolls: 2,
+      rebalanceMinBenefitMultiple: 1.5,
+      harvestMinBenefitMultiple: 2.0,
       tokenAMint: "So11111111111111111111111111111111111111112",
       tokenASymbol: "SOL",
       tokenADecimals: 9,
       tokenBMint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
       tokenBSymbol: "USDC",
       tokenBDecimals: 6,
-      platform: "orca" as const,
       createdAt: "2026-03-14T00:00:00.000Z",
       updatedAt: "2026-03-14T00:00:00.000Z"
     },
@@ -73,6 +78,7 @@ describe("PositionPnlService", () => {
       lowerPrice: 89,
       upperPrice: 91,
       entryCapitalQuote: 100,
+      initialGrossValueQuote: 99,
       entryTokenA: "1000000000",
       entryTokenB: "1000000",
       residualTokenA: "50000000",
@@ -127,8 +133,11 @@ describe("PositionPnlService", () => {
     const records = await store.listRecords();
     expect(records).toHaveLength(1);
     expect(records[0]?.status).toBe("closed");
-    expect(records[0]?.latestNetPnlUsdc).not.toBeNull();
-    expect(records[0]?.realizedNetPnlUsdc).not.toBeNull();
+    // PnL = exitGrossValue - costBasis (Orca-style: currentValue vs initial LP value)
+    // costBasis = initialGrossValueQuote (99), not entryCapitalQuote (100)
+    expect(records[0]?.entryCapitalUsdc).toBe(99);
+    expect(records[0]?.latestNetPnlUsdc).toBe(105 - 99);
+    expect(records[0]?.realizedNetPnlUsdc).toBe(105 - 99);
 
     const dashboard = await service.getDashboardSnapshot(bots, ["orphaned-position"]);
     expect(dashboard.summary.closedPositionCount).toBe(1);
@@ -242,7 +251,9 @@ describe("PositionPnlService", () => {
       realizedNetPnlUsdc: null,
       openTxId: "open-tx",
       closeTxId: null,
-      bootstrapped: false
+      bootstrapped: false,
+      cumulativeCompoundedFeesUsdc: 0,
+      compoundCount: 0
     });
 
     await service.markOpenPosition(
@@ -281,7 +292,7 @@ describe("PositionPnlService", () => {
     expect(records[0]?.feesEarnedUsdc).toBe(60);
   });
 
-  it("repairs an inconsistent open entry basis from the recorded opening token amounts", async () => {
+  it("preserves entry capital on mark without rebasing", async () => {
     const root = await mkdtemp(join(tmpdir(), "orca-pnl-service-"));
     const store = new PnlLedgerStore(join(root, "pnl-ledger.json"));
     const service = new PositionPnlService(
@@ -334,7 +345,9 @@ describe("PositionPnlService", () => {
       realizedNetPnlUsdc: null,
       openTxId: "open-tx",
       closeTxId: null,
-      bootstrapped: false
+      bootstrapped: false,
+      cumulativeCompoundedFeesUsdc: 0,
+      compoundCount: 0
     });
 
     await service.markOpenPosition(
@@ -367,9 +380,11 @@ describe("PositionPnlService", () => {
     );
 
     const records = await store.listRecords();
-    expect(records[0]?.entryCapitalUsdc).toBeCloseTo(151.2, 6);
+    // Entry capital is frozen at deposit time — no rebasing
+    expect(records[0]?.entryCapitalUsdc).toBe(320_000);
     expect(records[0]?.latestGrossValueUsdc).toBeCloseTo(153.75, 6);
-    expect(records[0]?.latestNetPnlUsdc).toBeCloseTo(2.53, 2);
+    // PnL = grossValue - costBasis (Orca-style)
+    expect(records[0]?.latestNetPnlUsdc).toBeCloseTo(153.75 - 320_000, 0);
   });
 
   it("repairs an open record from the actual token debits in the open transaction", async () => {
@@ -429,7 +444,9 @@ describe("PositionPnlService", () => {
       realizedNetPnlUsdc: null,
       openTxId: "open-tx",
       closeTxId: null,
-      bootstrapped: false
+      bootstrapped: true,
+      cumulativeCompoundedFeesUsdc: 0,
+      compoundCount: 0
     });
 
     await service.markOpenPosition(
@@ -468,7 +485,105 @@ describe("PositionPnlService", () => {
     expect(records[0]?.latestNetPnlUsdc).toBeGreaterThan(4);
   });
 
-  it("adopts the first reliable live mark when startup saved a one-sided entry basis", async () => {
+  it("repairs an open record from a one-sided open transaction debit using target weights", async () => {
+    const root = await mkdtemp(join(tmpdir(), "orca-pnl-service-"));
+    const store = new PnlLedgerStore(join(root, "pnl-ledger.json"));
+    const service = new PositionPnlService(
+      store,
+      {
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn()
+      } as never,
+      async () => ({
+        tokenAUsdc: 90,
+        tokenBUsdc: 2_140,
+        solUsdc: 90
+      }),
+      async () => ({
+        tokenA: 0n,
+        tokenB: 3_880_626n
+      })
+    );
+    const bot = createBotRecord({
+      definition: {
+        ...createBotRecord().definition,
+        tokenBMint: "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs",
+        tokenBSymbol: "whETH",
+        tokenBDecimals: 8
+      }
+    });
+
+    await store.saveRecord({
+      id: "record-5",
+      botId: bot.definition.id,
+      botName: bot.definition.name,
+      whirlpoolAddress: bot.definition.whirlpoolAddress,
+      tokenPair: "SOL/whETH",
+      positionMint: "position-eth-sol-partial-open-tx",
+      status: "open",
+      openedAt: "2026-03-24T01:06:47.246Z",
+      closedAt: null,
+      entryCenterPrice: 0.042445184788114626,
+      entryLowerPrice: 0.04194188220169429,
+      entryUpperPrice: 0.042954527005572,
+      entryCapitalUsdc: 153.9902486221383,
+      entryTokenA: "850526192",
+      entryTokenB: "3588928",
+      residualTokenA: "122976740",
+      residualTokenB: "437111",
+      cumulativeSwapFeesUsdc: 0,
+      cumulativeTxFeesUsdc: 0.003099833049254773,
+      feesEarnedUsdc: 0.004217550664515891,
+      latestGrossValueUsdc: 165.76282126551564,
+      latestNetPnlUsdc: 11.76947281032809,
+      lastMarkedAt: "2026-03-24T01:23:35.079Z",
+      exitGrossValueUsdc: null,
+      realizedNetPnlUsdc: null,
+      openTxId: "open-tx",
+      closeTxId: null,
+      bootstrapped: true,
+      cumulativeCompoundedFeesUsdc: 0,
+      compoundCount: 0
+    });
+
+    await service.markOpenPosition(
+      bot.definition,
+      [bot],
+      {
+        closePosition: vi.fn(async () => ({
+          quote: {
+            quote: {
+              tokenMinA: "0",
+              tokenMinB: "0"
+            },
+            feesQuote: {
+              feeOwedA: "0",
+              feeOwedB: "0"
+            }
+          }
+        }))
+      } as never,
+      {
+        botId: bot.definition.id,
+        positionMint: "position-eth-sol-partial-open-tx",
+        markedAt: "2026-03-24T01:23:35.079Z",
+        centerPrice: 0.042373092873998736,
+        grossValueQuote: 0.0772526458584296,
+        feesEarnedQuote: 0.0000033056496983026057,
+        grossTokenA: "1034542982",
+        grossTokenB: "3341586"
+      }
+    );
+
+    const records = await store.listRecords();
+    expect(records[0]?.entryCapitalUsdc).toBeCloseTo(166.09, 2);
+    expect(records[0]?.entryTokenB).toBe("3880626");
+    expect(records[0]?.latestNetPnlUsdc).toBeLessThan(0);
+    expect(records[0]?.latestNetPnlUsdc).toBeGreaterThan(-1);
+  });
+
+  it("preserves entry capital without rebasing for non-bootstrapped positions", async () => {
     const root = await mkdtemp(join(tmpdir(), "orca-pnl-service-"));
     const store = new PnlLedgerStore(join(root, "pnl-ledger.json"));
     const service = new PositionPnlService(
@@ -499,7 +614,7 @@ describe("PositionPnlService", () => {
       botName: bot.definition.name,
       whirlpoolAddress: bot.definition.whirlpoolAddress,
       tokenPair: "SOL/whETH",
-      positionMint: "position-corrupted-open",
+      positionMint: "position-frozen-entry",
       status: "open",
       openedAt: "2026-03-14T00:00:00.000Z",
       closedAt: null,
@@ -521,7 +636,9 @@ describe("PositionPnlService", () => {
       realizedNetPnlUsdc: null,
       openTxId: "open-tx",
       closeTxId: null,
-      bootstrapped: false
+      bootstrapped: false,
+      cumulativeCompoundedFeesUsdc: 0,
+      compoundCount: 0
     });
 
     await service.markOpenPosition(
@@ -543,7 +660,7 @@ describe("PositionPnlService", () => {
       } as never,
       {
         botId: bot.definition.id,
-        positionMint: "position-corrupted-open",
+        positionMint: "position-frozen-entry",
         markedAt: "2026-03-14T00:10:00.000Z",
         centerPrice: 0.0416,
         grossValueQuote: 0.068,
@@ -554,9 +671,122 @@ describe("PositionPnlService", () => {
     );
 
     const records = await store.listRecords();
-    expect(records[0]?.entryCapitalUsdc).toBeCloseTo(146.88, 2);
-    expect(records[0]?.entryTokenA).toBe("830000000");
-    expect(records[0]?.entryTokenB).toBe("3400000");
-    expect(records[0]?.latestNetPnlUsdc).toBeCloseTo(-0.001, 2);
+    // Entry capital frozen at deposit-time value — no rebasing (Orca-style)
+    expect(records[0]?.entryCapitalUsdc).toBe(73);
+    // PnL = grossValue - costBasis (Orca-style)
+    const expectedGross = 0.068 * 2_160;
+    expect(records[0]?.latestGrossValueUsdc).toBeCloseTo(expectedGross, 1);
+    expect(records[0]?.latestNetPnlUsdc).toBeCloseTo(expectedGross - 73, 1);
+  });
+
+  it("reconciles stale open records that are no longer live on-chain", async () => {
+    const root = await mkdtemp(join(tmpdir(), "orca-pnl-service-"));
+    const store = new PnlLedgerStore(join(root, "pnl-ledger.json"));
+    const service = new PositionPnlService(
+      store,
+      {
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn()
+      } as never
+    );
+    const activeBot = createBotRecord();
+    const archivedBot = createBotRecord({
+      definition: {
+        ...createBotRecord().definition,
+        id: "bot-archived",
+        enabled: false,
+        archived: true
+      },
+      runtime: {
+        ...createEmptyBotRuntimeState(),
+        monitoringActive: false
+      }
+    });
+
+    await store.saveRecord({
+      id: "record-live",
+      botId: activeBot.definition.id,
+      botName: activeBot.definition.name,
+      whirlpoolAddress: activeBot.definition.whirlpoolAddress,
+      tokenPair: "SOL/USDC",
+      positionMint: "live-position",
+      status: "open",
+      openedAt: "2026-03-14T00:00:00.000Z",
+      closedAt: null,
+      entryCenterPrice: 90,
+      entryLowerPrice: 89,
+      entryUpperPrice: 91,
+      entryCapitalUsdc: 100,
+      entryTokenA: "1",
+      entryTokenB: "1",
+      residualTokenA: "0",
+      residualTokenB: "0",
+      cumulativeSwapFeesUsdc: 0,
+      cumulativeTxFeesUsdc: 0,
+      feesEarnedUsdc: 1,
+      latestGrossValueUsdc: 101,
+      latestNetPnlUsdc: 1,
+      lastMarkedAt: "2026-03-14T00:10:00.000Z",
+      exitGrossValueUsdc: null,
+      realizedNetPnlUsdc: null,
+      openTxId: "open-live",
+      closeTxId: null,
+      bootstrapped: false,
+      cumulativeCompoundedFeesUsdc: 0,
+      compoundCount: 0
+    });
+    await store.saveRecord({
+      id: "record-stale",
+      botId: archivedBot.definition.id,
+      botName: archivedBot.definition.name,
+      whirlpoolAddress: archivedBot.definition.whirlpoolAddress,
+      tokenPair: "SOL/USDC",
+      positionMint: "stale-position",
+      status: "open",
+      openedAt: "2026-03-14T00:00:00.000Z",
+      closedAt: null,
+      entryCenterPrice: 90,
+      entryLowerPrice: 89,
+      entryUpperPrice: 91,
+      entryCapitalUsdc: 100,
+      entryTokenA: "1",
+      entryTokenB: "1",
+      residualTokenA: "0",
+      residualTokenB: "0",
+      cumulativeSwapFeesUsdc: 0,
+      cumulativeTxFeesUsdc: 0,
+      feesEarnedUsdc: 2,
+      latestGrossValueUsdc: 98,
+      latestNetPnlUsdc: -2,
+      lastMarkedAt: "2026-03-14T00:10:00.000Z",
+      exitGrossValueUsdc: null,
+      realizedNetPnlUsdc: null,
+      openTxId: "open-stale",
+      closeTxId: null,
+      bootstrapped: false,
+      cumulativeCompoundedFeesUsdc: 0,
+      compoundCount: 0
+    });
+
+    const dashboard = await service.getDashboardSnapshot(
+      [
+        {
+          ...activeBot,
+          runtime: {
+            ...activeBot.runtime,
+            activePositionMint: "live-position"
+          }
+        },
+        archivedBot
+      ],
+      ["live-position"]
+    );
+
+    const staleRecord = dashboard.positions.find((record) => record.positionMint === "stale-position");
+    expect(staleRecord?.status).toBe("closed");
+    expect(staleRecord?.closeTxId).toBe("reconciled-missing-on-chain");
+    expect(dashboard.summary.openPositionCount).toBe(1);
+    expect(dashboard.summary.closedPositionCount).toBe(1);
   });
 });
