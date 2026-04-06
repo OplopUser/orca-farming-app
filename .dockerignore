@@ -1,0 +1,16 @@
+node_modules
+dist
+data
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+wallet.json
+*keypair*.json
+.git
+.github
+.claude
+coverage
+tests
+*.tar.gz
