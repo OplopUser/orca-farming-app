@@ -230,7 +230,7 @@ The **Code default** column applies when a variable is unset. `.env.example` shi
 |---|---|
 | `npm run ui` | Start the control panel and the multi-bot supervisor. **This is the main entry point.** |
 | `npm run run` | Single-pool CLI: loop on `ORCA_WHIRLPOOL_ADDRESS` every `POLL_SECONDS`, with live transactions |
-| `npm run dry-run` | Single-pool CLI: one cycle with trigger evaluation and close/swap/open quotes, sending no rebalance transactions |
+| `npm run dry-run` | Single-pool CLI: one cycle with trigger evaluation and close/swap/open/compound quotes, sending no transactions |
 | `npm run rebalance-now` | Single-pool CLI: one cycle that forces a rebalance (live) |
 | `npm test` | Run the Vitest suite |
 | `npm run typecheck` | Type-check without emitting |
@@ -238,7 +238,7 @@ The **Code default** column applies when a variable is unset. `.env.example` shi
 
 The CLI commands drive one pool from the env settings and keep their state in `BOT_STATE_FILE`. They don't use the bot registry, the shared queue or the PnL ledger. Don't run the CLI and the panel against the same wallet at the same time: they don't coordinate.
 
-> `dry-run` still writes runtime state to `BOT_STATE_FILE`. Keep `COMPOUND_INTERVAL_SECONDS=0` when you use it: the compounding path does not check the dry-run flag.
+> `dry-run` never sends a transaction: it logs the close, swap, open and compound steps it would take instead, and its client refuses any send as a backstop. If `BOT_STATE_FILE` holds a pending rebalance or a paused bot, it logs that recovery would resume and stops, because recovery only runs live. It still writes runtime state (last cycle, drift status, latest action) to `BOT_STATE_FILE`.
 
 ## Docker / Raspberry Pi deployment
 
@@ -247,7 +247,7 @@ The repo has a multi-stage `Dockerfile` (`node:20-bookworm-slim`), a GitHub Acti
 **CI** (`.github/workflows/build-and-push.yml`): every push to `main` builds a `linux/arm64` image with Buildx and QEMU and pushes it to GitHub Container Registry as `ghcr.io/<owner>/<repo>:latest` and `:<commit-sha>`.
 
 **Host** (`docker-compose.yml`):
-- `orca-bot` runs the image with `.env` as its env file, mounts `./data` for state and logs, mounts `./wallet.json` read-only and publishes port `8787`
+- `orca-bot` runs the image with `.env` as its env file, mounts `./data` for state and logs, mounts `./wallet.json` read-only and publishes port `8787`. The image's `CMD` is `node dist/src/controlPanel.js`, so the container runs the control panel and multi-bot supervisor (the same as `npm run ui`).
 - `watchtower` polls the registry every 5 minutes and restarts the container on a new image, so a push to `main` reaches the Pi automatically. It reads `~/.docker/config.json` for registry credentials.
 
 ```bash
@@ -259,9 +259,11 @@ docker compose up -d
 docker compose logs -f orca-bot
 ```
 
+Then open `http://<host>:8787`. Leave `UI_HOST` unset (or `0.0.0.0`) inside the container so the published port reaches the panel, and restrict access at the host instead (see [Control panel](#control-panel)): for example publish `"127.0.0.1:8787:8787"` and use an SSH tunnel or VPN.
+
 Change the `image:` line in `docker-compose.yml` to point at your own registry namespace.
 
-> **Default container command:** the image's `CMD` is `node dist/src/index.js run`, which is the **single-pool CLI loop**, not the control panel. To run the multi-bot panel in the container instead, override the command, for example with `command: ["node", "dist/src/controlPanel.js"]` in the compose service. Port 8787 serves the UI only in that case.
+> To run the single-pool CLI loop in the container instead of the panel, override the command, for example with `command: ["node", "dist/src/index.js", "run"]` in the compose service. Nothing listens on port 8787 in that case.
 
 ## Testing
 
@@ -276,7 +278,7 @@ The suite runs offline. It uses temporary directories for the JSON stores and st
 |---|---|
 | `tests/bands.test.ts`, `drift.test.ts`, `replay.test.ts` | Band maths, drift trigger windows, price-replay triggering |
 | `tests/recovery.test.ts` | Timeout classification helpers |
-| `tests/rebalancer-recovery.test.ts` | Rebalance state machine: resume after timeouts, position adoption, simulation-failure retries, allocation deferral, pre-open swaps |
+| `tests/rebalancer-recovery.test.ts` | Rebalance state machine: resume after timeouts, position adoption, simulation-failure retries, allocation deferral, pre-open swaps; dry-run guard (no sends from rebalance, recovery or compounding) |
 | `tests/bot-registry-store.test.ts` | Registry CRUD, archiving and legacy-state migration |
 | `tests/pnl-math.test.ts` | PnL aggregation and USD price resolution |
 | `tests/position-pnl-service.test.ts` | Ledger open/mark/close, basis repair, stale-record reconciliation |

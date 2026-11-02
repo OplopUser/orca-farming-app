@@ -14,7 +14,7 @@ async function main() {
   const config = loadConfig();
   const logger = createLogger(config);
   const stateStore = new StateStore(config.BOT_STATE_FILE);
-  const orcaClient = new OrcaClient(config);
+  const orcaClient = new OrcaClient(config, { dryRun: mode === "dry-run" });
 
   await orcaClient.init();
 

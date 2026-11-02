@@ -121,6 +121,17 @@ interface CenteredOpenPlan {
   bufferedDeployableTokenB: bigint;
 }
 
+export class DryRunSendBlockedError extends Error {
+  constructor(
+    public readonly phase: RebalancePhase,
+    public readonly details: Record<string, string | null> = {}
+  ) {
+    super(`Dry-run: refused to send a ${phase} transaction`);
+    this.name = "DryRunSendBlockedError";
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
 export class InsufficientAllocationError extends Error {
   readonly configuredAllocationQuote: number;
   readonly availableAllocationQuote: number;
@@ -160,7 +171,10 @@ export class OrcaClient implements PlatformClient {
   private static readonly POSITION_CACHE_TTL_MS = 2_000;
   private positionCache: { positions: any[]; fetchedAt: number } | null = null;
 
-  constructor(private readonly config: AppConfig) {
+  constructor(
+    private readonly config: AppConfig,
+    private readonly options: { dryRun?: boolean } = {}
+  ) {
     this.rpcUrls = config.solanaRpcUrls;
     this.accountReader = new RpcAccountReader(this.rpcUrls);
   }
@@ -1395,6 +1409,11 @@ export class OrcaClient implements PlatformClient {
     phase: RebalancePhase,
     details: Record<string, string | null> = {}
   ) {
+    // Last line of defence: every on-chain send goes through here, so a dry-run client can never submit.
+    if (this.options.dryRun) {
+      throw new DryRunSendBlockedError(phase, details);
+    }
+
     for (let attempt = 0; attempt < OrcaClient.SEND_RATE_LIMIT_RETRIES; attempt += 1) {
       try {
         const sendPromise = send();

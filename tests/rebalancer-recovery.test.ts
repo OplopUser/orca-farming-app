@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TransactionTimeoutError, type BotState, type PendingRebalance } from "../src/domain.js";
-import { InsufficientAllocationError } from "../src/clients/orcaClient.js";
+import { DryRunSendBlockedError, InsufficientAllocationError, OrcaClient } from "../src/clients/orcaClient.js";
 import { RebalancerService } from "../src/services/rebalancer.js";
 
 function createState(overrides: Partial<BotState> = {}): BotState {
@@ -869,5 +869,103 @@ describe("rebalancer timeout recovery", () => {
     expect(harness.getState().paused).toBe(false);
     expect(harness.getState().pendingRebalance).toBeNull();
     expect(harness.getState().activePositionMint).toBe("new-position");
+  });
+});
+
+describe("dry-run guard", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("does not resume a pending rebalance in dry-run mode", async () => {
+    const harness = createHarness(
+      createState({
+        pendingRebalance: createPending({ phase: "closing" }),
+        inFlightRebalance: true
+      })
+    );
+
+    await harness.service.runCycle("dry-run");
+
+    expect(harness.orcaClient.closePosition).not.toHaveBeenCalled();
+    expect(harness.orcaClient.swapToTarget).not.toHaveBeenCalled();
+    expect(harness.orcaClient.openCenteredPosition).not.toHaveBeenCalled();
+    expect(harness.orcaClient.fundQuoteTokenFromWallet).not.toHaveBeenCalled();
+    expect(harness.getState().pendingRebalance?.phase).toBe("closing");
+  });
+
+  it("does not convert a legacy paused timeout into a live recovery in dry-run mode", async () => {
+    const harness = createHarness(
+      createState({
+        paused: true,
+        pauseReason: "Transaction confirmation timeout"
+      })
+    );
+
+    await harness.service.runCycle("dry-run");
+
+    expect(harness.orcaClient.closePosition).not.toHaveBeenCalled();
+    expect(harness.orcaClient.openCenteredPosition).not.toHaveBeenCalled();
+    expect(harness.getState().pendingRebalance).toBeNull();
+    expect(harness.getState().paused).toBe(true);
+  });
+
+  it("only quotes a rebalance in dry-run mode", async () => {
+    const harness = createHarness(createState());
+
+    await harness.service.runCycle("dry-run");
+
+    expect(harness.orcaClient.closePosition).toHaveBeenCalled();
+    expect(harness.orcaClient.openCenteredPosition).toHaveBeenCalled();
+    for (const call of harness.orcaClient.closePosition.mock.calls as unknown[][]) {
+      expect(call[1]).toBe(false);
+    }
+    for (const call of harness.orcaClient.swapToTarget.mock.calls as unknown[][]) {
+      expect(call[3]).toBe(false);
+    }
+    for (const call of harness.orcaClient.openCenteredPosition.mock.calls as unknown[][]) {
+      expect(call[3]).toBe(false);
+    }
+    expect(harness.orcaClient.fundQuoteTokenFromWallet).not.toHaveBeenCalled();
+    expect(harness.getState().pendingRebalance).toBeNull();
+    expect(harness.getState().latestAction).toBe("dry-run rebalance complete");
+  });
+
+  it("logs instead of harvesting or compounding fees in dry-run mode", async () => {
+    const harvestFees = vi.fn(async () => ({ feesQuote: { feeOwedA: 1n, feeOwedB: 1n }, txId: "harvest-tx" }));
+    const increaseLiquidity = vi.fn(async () => ({ txId: "compound-tx" }));
+    const harness = createHarness(
+      createState({ driftStatus: "waiting", lastCenterPrice: 99.4, lastObservedPrice: 99.4 }),
+      {
+        harvestFees,
+        increaseLiquidity,
+        closePosition: vi.fn(async () => ({
+          dryRun: true,
+          quote: { quote: { tokenMinA: "0", tokenMinB: "0" }, feesQuote: { feeOwedA: "0", feeOwedB: "5000000" } },
+          txId: null
+        }))
+      }
+    );
+    (harness.service as any).config.COMPOUND_INTERVAL_SECONDS = 60;
+
+    await harness.service.runCycle("dry-run");
+
+    expect(harvestFees).not.toHaveBeenCalled();
+    expect(increaseLiquidity).not.toHaveBeenCalled();
+    expect(harness.getState().lastCompoundAt).toBeNull();
+    expect(harness.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ execute: false }),
+      expect.stringContaining("dry-run: would harvest fees")
+    );
+  });
+
+  it("refuses to send any transaction from a dry-run OrcaClient", async () => {
+    const client = new OrcaClient({ solanaRpcUrls: ["https://rpc.example"] } as never, { dryRun: true });
+    const send = vi.fn(async () => "tx");
+
+    await expect((client as any).sendWithConfirmationTimeout(send, "compounding")).rejects.toBeInstanceOf(
+      DryRunSendBlockedError
+    );
+    expect(send).not.toHaveBeenCalled();
   });
 });

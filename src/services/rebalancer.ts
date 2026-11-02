@@ -114,6 +114,19 @@ export class RebalancerService {
       await this.stateStore.save(state);
     }
 
+    // Dry-run never resumes a pending rebalance or a paused bot: recovery sends live close/swap/open transactions.
+    if (mode === "dry-run" && (state.pendingRebalance || state.paused)) {
+      this.logger.warn(
+        {
+          mode,
+          pendingPhase: state.pendingRebalance?.phase ?? null,
+          pauseReason: state.pauseReason
+        },
+        "dry-run: would resume pending rebalance / paused bot recovery; skipped, no transactions sent"
+      );
+      return;
+    }
+
     if (!state.pendingRebalance && state.paused && this.isTimeoutMessage(state.pauseReason)) {
       await this.seedLegacyTimeoutRecovery(state);
     }
@@ -269,7 +282,7 @@ export class RebalancerService {
 
     if (state.activePositionMint && this.shouldCompound(state)) {
       try {
-        await this.runExclusive("trigger", () => this.executeCompound(state, pool.currentPrice));
+        await this.runExclusive("trigger", () => this.executeCompound(state, pool.currentPrice, false, mode === "dry-run"));
       } catch (error) {
         this.logger.warn(
           { error: (error as Error).message },
@@ -409,7 +422,12 @@ export class RebalancerService {
     return true;
   }
 
-  private async executeCompound(state: BotRuntimeState, currentPrice: number, skipMinCheck = false): Promise<void> {
+  private async executeCompound(
+    state: BotRuntimeState,
+    currentPrice: number,
+    skipMinCheck = false,
+    dryRun = false
+  ): Promise<void> {
     const positionMint = state.activePositionMint!;
 
     const markQuote = await this.orcaClient.closePosition(positionMint, false, 0);
@@ -452,6 +470,18 @@ export class RebalancerService {
         );
         return;
       }
+    }
+
+    if (dryRun) {
+      this.logger.info(
+        {
+          execute: false,
+          positionMint,
+          feesEarnedQuote: markSummary.feesEarnedQuote
+        },
+        "dry-run: would harvest fees and add them back as liquidity; no transactions sent"
+      );
+      return;
     }
 
     this.logger.info(
@@ -524,6 +554,11 @@ export class RebalancerService {
   }
 
   private async executeRebalance(mode: RunMode, state: BotRuntimeState, currentPrice: number): Promise<void> {
+    if (mode === "dry-run") {
+      await this.executeDryRunRebalance(state, currentPrice);
+      return;
+    }
+
     if (state.pendingRebalance) {
       await this.reconcilePendingRebalance(state);
       return;
@@ -531,11 +566,6 @@ export class RebalancerService {
 
     if (state.inFlightRebalance) {
       this.logger.warn("rebalance skipped because one is already in flight");
-      return;
-    }
-
-    if (mode === "dry-run") {
-      await this.executeDryRunRebalance(state, currentPrice);
       return;
     }
 
