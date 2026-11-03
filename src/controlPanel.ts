@@ -1,19 +1,23 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { resolve, sep } from "node:path";
 
 import dotenv from "dotenv";
 
 import { loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
-import { BotRegistryStore } from "./state/botRegistryStore.js";
+import { isLoopbackHost, PanelAuth } from "./panelAuth.js";
+import { BotRegistryStore, type CreateBotInput } from "./state/botRegistryStore.js";
 import { BotSupervisor } from "./services/botSupervisor.js";
 
 dotenv.config({ override: true });
 
-const HOST = process.env.UI_HOST ?? "0.0.0.0";
+// Loopback by default: the panel can move funds, so exposing it is an explicit choice (UI_HOST=0.0.0.0).
+const HOST = process.env.UI_HOST?.trim() || "127.0.0.1";
 const PORT = Number(process.env.UI_PORT ?? 8787);
+const UI_TOKEN = process.env.UI_TOKEN?.trim() ?? "";
 const PUBLIC_DIR = resolve("public");
+const auth = UI_TOKEN ? new PanelAuth(UI_TOKEN) : null;
 
 const config = loadConfig();
 const logger = createLogger(config);
@@ -292,7 +296,20 @@ function summarizeBot(
 async function serveStatic(pathname: string, response: ServerResponse) {
   const filePath =
     pathname === "/" ? resolve(PUBLIC_DIR, "index.html") : resolve(PUBLIC_DIR, `.${pathname}`);
-  const file = await readFile(filePath);
+  if (!filePath.startsWith(PUBLIC_DIR + sep)) {
+    return sendError(response, 404, "Not found");
+  }
+
+  let file: Buffer;
+  try {
+    file = await readFile(filePath);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "EISDIR") {
+      return sendError(response, 404, "Not found");
+    }
+    throw error;
+  }
   const contentType =
     pathname.endsWith(".css")
       ? "text/css; charset=utf-8"
@@ -327,7 +344,8 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, url
     const payload = {
       wallet,
       bots: bots.map((bot) => summarizeBot(bot, pnl.botSummaries[bot.definition.id])),
-      pnl: pnl.summary
+      pnl: pnl.summary,
+      panel: { authEnabled: Boolean(auth) }
     };
     const json = JSON.stringify(payload);
     statusCache = { json, cachedAt: Date.now() };
@@ -341,31 +359,13 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, url
     return sendJson(response, 200, { bots: bots.map((bot) => summarizeBot(bot, pnl.botSummaries[bot.definition.id])) });
   }
 
+  if (pathname === "/api/bot-defaults" && method === "GET") {
+    return sendJson(response, 200, { defaults: supervisor.getBotDefaults() });
+  }
+
   if (pathname === "/api/bots" && method === "POST") {
-    const payload = await readJson<{
-      name: string;
-      whirlpoolAddress: string;
-      allocationUsdc: number;
-      rangePct: number;
-      rebalanceDriftPct: number;
-      pollSeconds: number;
-      maxSlippageBps: number;
-      closeRetrySlippageBps: number;
-      closeFinalRetrySlippageBps: number;
-      openRetrySlippageBps: number;
-      openFinalRetrySlippageBps: number;
-      slippageRetriesPerTier: number;
-      openDeploymentBufferBps: number;
-      openRetryDeploymentBufferBps: number;
-      openFinalDeploymentBufferBps: number;
-      minSwapQuoteValue: number;
-      openBalanceToleranceBps: number;
-      compoundIntervalSeconds: number;
-      compoundMinQuoteValue: number;
-      driftConfirmPolls: number;
-      rebalanceMinBenefitMultiple: number;
-      harvestMinBenefitMultiple: number;
-    }>(request);
+    // Any strategy field left out of the request falls back to the config defaults.
+    const payload = await readJson<Partial<CreateBotInput>>(request);
     const bot = await supervisor.createBot(payload);
     invalidateStatusCache();
     return sendJson(response, 201, { bot: summarizeBot(bot) });
@@ -496,6 +496,10 @@ async function main() {
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", `http://${HOST}:${PORT}`);
+      if (auth && (await auth.handle(request, response, url))) {
+        return;
+      }
+
       if (url.pathname.startsWith("/api/")) {
         await handleApi(request, response, url);
         return;
@@ -508,7 +512,15 @@ async function main() {
   });
 
   server.listen(PORT, HOST, () => {
-    logger.info({ host: HOST, port: PORT }, "multi-bot control panel listening");
+    logger.info({ host: HOST, port: PORT, auth: auth ? "token" : "none" }, "multi-bot control panel listening");
+    if (!auth && !isLoopbackHost(HOST)) {
+      const warning =
+        `UI_HOST=${HOST} exposes the control panel beyond this machine WITHOUT authentication. ` +
+        "Anyone who can reach the port can create bots, trigger swaps and close positions. " +
+        "Set UI_TOKEN, or bind to 127.0.0.1.";
+      logger.warn({ host: HOST, port: PORT }, warning);
+      console.error(`\n${"!".repeat(78)}\n!! WARNING: ${warning}\n${"!".repeat(78)}\n`);
+    }
   });
 }
 

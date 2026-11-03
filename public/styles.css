@@ -85,6 +85,45 @@ body {
   white-space: nowrap;
 }
 
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.topbar-link {
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-decoration: none;
+}
+
+.topbar-link:hover {
+  color: var(--text);
+}
+
+/* ---- Login ---- */
+.login-shell {
+  min-height: 100vh;
+  justify-content: center;
+  max-width: 420px;
+}
+
+.login-card h1 {
+  margin: 0 0 6px;
+  font-size: 20px;
+}
+
+.login-card .muted {
+  margin: 0 0 18px;
+  color: var(--text-secondary);
+}
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
 /* ---- KPI row ---- */
 .kpi-row {
   display: grid;

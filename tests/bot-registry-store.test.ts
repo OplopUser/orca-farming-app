@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 
 import type { AppConfig } from "../src/config.js";
-import { BotRegistryStore } from "../src/state/botRegistryStore.js";
+import { BotRegistryStore, botDefaultsFromConfig, withBotDefaults } from "../src/state/botRegistryStore.js";
 
 function createConfig(root: string): AppConfig {
   return {
@@ -133,5 +133,36 @@ describe("BotRegistryStore", () => {
 
     const persisted = JSON.parse(await readFile(config.BOT_REGISTRY_FILE, "utf8")) as { bots: Array<unknown> };
     expect(persisted.bots).toHaveLength(1);
+  });
+});
+
+describe("bot defaults", () => {
+  it("derives every per-bot strategy default from the env config", () => {
+    const config = createConfig("/unused");
+    const defaults = botDefaultsFromConfig(config);
+
+    expect(defaults.maxSlippageBps).toBe(config.MAX_SLIPPAGE_BPS);
+    expect(defaults.minSwapQuoteValue).toBe(config.MIN_SWAP_USDC);
+    expect(defaults.rebalanceMinBenefitMultiple).toBe(config.REBALANCE_MIN_BENEFIT_MULTIPLE);
+    expect(Object.values(defaults).every((value) => typeof value === "number" && Number.isFinite(value))).toBe(true);
+  });
+
+  it("fills fields a create request leaves out, and keeps the ones it sets", () => {
+    const config = createConfig("/unused");
+    const input = withBotDefaults(config, {
+      name: "Test",
+      whirlpoolAddress: "pool",
+      allocationUsdc: 250,
+      rebalanceMinBenefitMultiple: 0,
+      maxSlippageBps: Number.NaN
+    });
+
+    expect(input.name).toBe("Test");
+    expect(input.whirlpoolAddress).toBe("pool");
+    expect(input.allocationUsdc).toBe(250);
+    expect(input.rebalanceMinBenefitMultiple).toBe(0);
+    expect(input.maxSlippageBps).toBe(config.MAX_SLIPPAGE_BPS);
+    expect(input.harvestMinBenefitMultiple).toBe(config.HARVEST_MIN_BENEFIT_MULTIPLE);
+    expect(input.slippageRetriesPerTier).toBe(config.SLIPPAGE_RETRIES_PER_TIER);
   });
 });

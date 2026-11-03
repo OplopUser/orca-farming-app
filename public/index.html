@@ -15,6 +15,7 @@
         </div>
         <div class="topbar-right">
           <span class="topbar-wallet" id="walletAddress">-</span>
+          <a id="signOutLink" class="topbar-link" href="/logout" hidden>Sign out</a>
         </div>
       </header>
 
@@ -94,70 +95,86 @@
             </label>
             <label>
               <span>Allocation (USDC)</span>
-              <input id="allocationInput" name="allocationUsdc" type="number" min="1" step="0.01" value="100" required />
+              <input id="allocationInput" name="allocationUsdc" type="number" min="1" step="0.01" placeholder="100" required />
             </label>
             <label>
               <span>LP Range %</span>
-              <input name="rangePct" type="number" min="0.01" step="0.01" value="1" required />
+              <input name="rangePct" type="number" min="0.01" step="0.01" required />
             </label>
             <label>
               <span>Drift %</span>
-              <input name="rebalanceDriftPct" type="number" min="0.01" step="0.01" value="0.5" required />
+              <input name="rebalanceDriftPct" type="number" min="0.01" step="0.01" required />
             </label>
             <label>
               <span>Poll (sec)</span>
-              <input name="pollSeconds" type="number" min="5" step="1" value="15" required />
+              <input name="pollSeconds" type="number" min="5" step="1" required />
             </label>
             <details class="advanced-toggle">
-              <summary>Advanced settings</summary>
+              <summary>Advanced settings (defaults come from the server's env config)</summary>
               <div class="advanced-grid">
                 <label>
                   <span>Max Slippage Bps</span>
-                  <input name="maxSlippageBps" type="number" min="1" step="1" value="100" required />
+                  <input name="maxSlippageBps" type="number" min="1" step="1" />
                 </label>
                 <label>
                   <span>Close Retry Bps</span>
-                  <input name="closeRetrySlippageBps" type="number" min="1" step="1" value="300" required />
+                  <input name="closeRetrySlippageBps" type="number" min="1" step="1" />
                 </label>
                 <label>
                   <span>Close Final Bps</span>
-                  <input name="closeFinalRetrySlippageBps" type="number" min="1" step="1" value="1000" required />
+                  <input name="closeFinalRetrySlippageBps" type="number" min="1" step="1" />
                 </label>
                 <label>
                   <span>Open Retry Bps</span>
-                  <input name="openRetrySlippageBps" type="number" min="1" step="1" value="300" required />
+                  <input name="openRetrySlippageBps" type="number" min="1" step="1" />
                 </label>
                 <label>
                   <span>Open Final Bps</span>
-                  <input name="openFinalRetrySlippageBps" type="number" min="1" step="1" value="1000" required />
+                  <input name="openFinalRetrySlippageBps" type="number" min="1" step="1" />
+                </label>
+                <label>
+                  <span>Retries per Tier</span>
+                  <input name="slippageRetriesPerTier" type="number" min="1" step="1" />
                 </label>
                 <label>
                   <span>Open Buffer Bps</span>
-                  <input name="openDeploymentBufferBps" type="number" min="0" step="1" value="100" required />
+                  <input name="openDeploymentBufferBps" type="number" min="0" step="1" />
                 </label>
                 <label>
                   <span>Open Retry Buffer</span>
-                  <input name="openRetryDeploymentBufferBps" type="number" min="0" step="1" value="300" required />
+                  <input name="openRetryDeploymentBufferBps" type="number" min="0" step="1" />
                 </label>
                 <label>
                   <span>Open Final Buffer</span>
-                  <input name="openFinalDeploymentBufferBps" type="number" min="0" step="1" value="500" required />
+                  <input name="openFinalDeploymentBufferBps" type="number" min="0" step="1" />
                 </label>
                 <label>
                   <span>Min Swap Quote</span>
-                  <input name="minSwapQuoteValue" type="number" min="0" step="0.01" value="10" required />
+                  <input name="minSwapQuoteValue" type="number" min="0" step="0.01" />
                 </label>
                 <label>
                   <span>Balance Tolerance Bps</span>
-                  <input name="openBalanceToleranceBps" type="number" min="0" step="1" value="25" required />
+                  <input name="openBalanceToleranceBps" type="number" min="0" step="1" />
+                </label>
+                <label>
+                  <span>Drift Confirm Polls</span>
+                  <input name="driftConfirmPolls" type="number" min="0" step="1" />
+                </label>
+                <label>
+                  <span>Rebalance Min Benefit ×</span>
+                  <input name="rebalanceMinBenefitMultiple" type="number" min="0" step="0.1" />
                 </label>
                 <label>
                   <span>Compound Interval (s)</span>
-                  <input name="compoundIntervalSeconds" type="number" min="0" step="1" value="0" required />
+                  <input name="compoundIntervalSeconds" type="number" min="0" step="1" />
                 </label>
                 <label>
                   <span>Compound Min Value</span>
-                  <input name="compoundMinQuoteValue" type="number" min="0" step="0.01" value="0.5" required />
+                  <input name="compoundMinQuoteValue" type="number" min="0" step="0.01" />
+                </label>
+                <label>
+                  <span>Harvest Min Benefit ×</span>
+                  <input name="harvestMinBenefitMultiple" type="number" min="0" step="0.1" />
                 </label>
               </div>
             </details>

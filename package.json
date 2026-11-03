@@ -16,15 +16,15 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@meteora-ag/dlmm": "^1.9.4",
+    "@orca-so/tx-sender": "3.0.0",
     "@orca-so/whirlpools": "7.0.1",
+    "@orca-so/whirlpools-client": "6.2.0",
     "@solana/kit": "5.5.1",
     "dotenv": "17.3.1",
     "pino": "10.3.1",
     "zod": "4.3.6"
   },
   "devDependencies": {
-    "@types/bn.js": "^5.2.0",
     "@types/node": "25.5.0",
     "tsx": "4.21.0",
     "typescript": "5.9.3",

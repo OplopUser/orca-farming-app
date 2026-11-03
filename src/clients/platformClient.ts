@@ -57,10 +57,18 @@ export interface SwapOptions {
   valueToleranceBps?: number;
 }
 
+/** A funding source that was skipped because no quote/route could be obtained (nothing was sent). */
+export interface FundingFailure {
+  sourceMint: string;
+  error: string;
+}
+
 export interface FundResult {
   fundedQuoteAmount: bigint;
   txIds: string[];
   route: unknown;
+  /** Sources skipped because quoting failed; callers should log these. Swap (send) failures throw instead. */
+  failures: FundingFailure[];
 }
 
 export interface PlatformClient {

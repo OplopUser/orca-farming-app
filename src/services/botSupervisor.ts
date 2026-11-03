@@ -25,6 +25,9 @@ import { resolveTokenPricesUsdc, resolveTokenPricesUsdcStrict } from "./pnlMath.
 import {
   BotRegistryStore,
   BotRuntimeStore,
+  botDefaultsFromConfig,
+  withBotDefaults,
+  type BotStrategyDefaults,
   type CreateBotInput,
   type UpdateBotInput
 } from "../state/botRegistryStore.js";
@@ -111,10 +114,20 @@ export class BotSupervisor {
     return this.registryStore.getBot(botId);
   }
 
-  async createBot(input: CreateBotInput): Promise<BotRecord> {
+  /** Strategy defaults for new bots, taken from the env config (see botDefaultsFromConfig). */
+  getBotDefaults(): BotStrategyDefaults {
+    return botDefaultsFromConfig(this.config);
+  }
+
+  async createBot(input: Partial<CreateBotInput>): Promise<BotRecord> {
+    if (typeof input.whirlpoolAddress !== "string" || !input.whirlpoolAddress.trim()) {
+      throw new Error("whirlpoolAddress is required");
+    }
+
     await this.init();
-    const metadata = await this.sharedClient.discoverPoolMetadata(input.whirlpoolAddress);
-    const record = await this.registryStore.createBot(input, metadata);
+    const completeInput = withBotDefaults(this.config, { ...input, whirlpoolAddress: input.whirlpoolAddress.trim() });
+    const metadata = await this.sharedClient.discoverPoolMetadata(completeInput.whirlpoolAddress);
+    const record = await this.registryStore.createBot(completeInput, metadata);
     await this.ensureRunner(record);
     return record;
   }

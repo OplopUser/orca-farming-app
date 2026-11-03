@@ -11,7 +11,7 @@ import {
 import { RpcAccountReader, type WalletAssetBalance } from "../infra/rpcAccountReader.js";
 import { isRecoverableRpcError } from "../infra/rpcFailover.js";
 import { computeBand, computeTargetValueWeights, fromBaseUnits, toBaseUnits } from "../strategy/bands.js";
-import type { PlatformClient } from "./platformClient.js";
+import type { FundingFailure, PlatformClient } from "./platformClient.js";
 
 interface WhirlpoolSdkModule {
   fetchWhirlpool?: (...args: unknown[]) => Promise<any>;
@@ -128,6 +128,26 @@ export class DryRunSendBlockedError extends Error {
   ) {
     super(`Dry-run: refused to send a ${phase} transaction`);
     this.name = "DryRunSendBlockedError";
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/**
+ * A wallet-funding swap failed after quoting succeeded. Earlier hops/routes may already have landed,
+ * so the error carries their signatures for fee accounting and reconciliation.
+ */
+export class FundingSwapError extends Error {
+  constructor(
+    public readonly sourceMint: string,
+    public readonly completedTxIds: string[],
+    cause: unknown
+  ) {
+    super(
+      `Wallet funding swap from ${sourceMint} failed: ${cause instanceof Error ? cause.message : String(cause)}` +
+        (completedTxIds.length ? ` (already sent: ${completedTxIds.join(", ")})` : ""),
+      { cause }
+    );
+    this.name = "FundingSwapError";
     Object.setPrototypeOf(this, new.target.prototype);
   }
 }
@@ -814,17 +834,23 @@ export class OrcaClient implements PlatformClient {
 
   async fundQuoteTokenFromWallet(targetQuoteAmount: bigint, execute: boolean) {
     await this.init();
+    const failures: FundingFailure[] = [];
     if (targetQuoteAmount <= 0n) {
       return {
         fundedQuoteAmount: 0n,
         txIds: [] as string[],
-        route: null as FundingRoute | null
+        route: null as FundingRoute | null,
+        failures
       };
     }
 
     const owner = this.getOwnerAddress();
     const assets = await this.accountReader.listWalletAssets(owner);
-    const candidateAssets = this.prioritizeFundingAssets(assets.filter((asset) => asset.mint !== this.config.TOKEN_B_MINT));
+    const candidateAssets = this.prioritizeFundingAssets(
+      assets
+        .filter((asset) => asset.mint !== this.config.TOKEN_B_MINT)
+        .map((asset) => ({ ...asset, amount: this.spendableFundingAmount(asset.mint, asset.amount) }))
+    );
     const txIds: string[] = [];
     const routes: FundingRoute[] = [];
     let fundedQuoteAmount = 0n;
@@ -835,14 +861,22 @@ export class OrcaClient implements PlatformClient {
         break;
       }
 
-      const route = await this.findFundingRoute(asset.mint, asset.amount, remainingQuoteAmount);
+      // Quoting has no side effects: a source that can't be quoted is recorded and skipped.
+      let route: FundingRoute | null;
+      try {
+        route = await this.findFundingRoute(asset.mint, asset.amount, remainingQuoteAmount);
+      } catch (error) {
+        failures.push({ sourceMint: asset.mint, error: (error as Error).message ?? String(error) });
+        continue;
+      }
+
       if (!route) {
         continue;
       }
 
-      try {
-        const routeTxIds: string[] = [];
-        for (const hop of route.hops) {
+      // Swapping does: once a send fails we can't know what landed, so stop and surface it.
+      for (const hop of route.hops) {
+        try {
           const swapResult = await this.jupiterSwap({
             inputMint: hop.quote.inputMint,
             outputMint: hop.quote.outputMint,
@@ -852,18 +886,19 @@ export class OrcaClient implements PlatformClient {
             quoteResponse: hop.quote
           });
           if (swapResult.txId) {
-            routeTxIds.push(swapResult.txId);
+            txIds.push(swapResult.txId);
           }
+        } catch (error) {
+          if (error instanceof TransactionTimeoutError || error instanceof DryRunSendBlockedError) {
+            throw error;
+          }
+          throw new FundingSwapError(asset.mint, [...txIds], error);
         }
-
-        txIds.push(...routeTxIds);
-        routes.push(route);
-        fundedQuoteAmount += route.outputAmount;
-        remainingQuoteAmount = remainingQuoteAmount > route.outputAmount ? remainingQuoteAmount - route.outputAmount : 0n;
-      } catch (error) {
-        // Skip bad funding routes so a single failing asset path does not pause the whole bot.
-        continue;
       }
+
+      routes.push(route);
+      fundedQuoteAmount += route.outputAmount;
+      remainingQuoteAmount = remainingQuoteAmount > route.outputAmount ? remainingQuoteAmount - route.outputAmount : 0n;
     }
 
     return {
@@ -877,8 +912,19 @@ export class OrcaClient implements PlatformClient {
               outputAmount: fundedQuoteAmount,
               hops: routes.flatMap((route) => route.hops)
             }
-          : null as FundingRoute | null
+          : null as FundingRoute | null,
+      failures
     };
+  }
+
+  /** How much of a wallet asset funding swaps may spend: SOL always keeps SOL_RESERVE_LAMPORTS back for fees. */
+  private spendableFundingAmount(mint: string, amount: bigint) {
+    if (mint !== OrcaClient.SOL_MINT) {
+      return amount;
+    }
+
+    const reserve = BigInt(this.config.SOL_RESERVE_LAMPORTS);
+    return amount > reserve ? amount - reserve : 0n;
   }
 
   private async jupiterSwap(params: {

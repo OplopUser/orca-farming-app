@@ -25,7 +25,14 @@ import {
   classifySwapTimeout,
   shouldRecoverPausedTimeout
 } from "./recovery.js";
-import { computeBand, computeTargetValueWeights, evaluateDriftTrigger, fromBaseUnits, toBaseUnits } from "../strategy/bands.js";
+import {
+  computeBand,
+  computeTargetValueWeights,
+  evaluateDriftTrigger,
+  fromBaseUnits,
+  passesRebalanceBenefitGate,
+  toBaseUnits
+} from "../strategy/bands.js";
 import { describeCloseQuote } from "./positionPnlService.js";
 import { InsufficientAllocationError, OrcaClient } from "../clients/orcaClient.js";
 
@@ -206,7 +213,7 @@ export class RebalancerService {
       // Use a rough APR proxy: (driftPct / rangePct) captures how far price moved relative to band.
       const driftFraction = Math.abs(pool.currentPrice - baselineCenter) / baselineCenter;
       const expectedFeeQuote = allocationQuote * driftFraction * 0.5; // half of drift as rough fee proxy
-      if (expectedFeeQuote * this.config.REBALANCE_MIN_BENEFIT_MULTIPLE < estimatedSwapCostQuote) {
+      if (!passesRebalanceBenefitGate(expectedFeeQuote, estimatedSwapCostQuote, this.config.REBALANCE_MIN_BENEFIT_MULTIPLE)) {
         shouldRebalance = false;
         this.logger.info(
           {
@@ -2388,13 +2395,25 @@ export class RebalancerService {
     }
 
     const fundingResult = await this.orcaClient.fundQuoteTokenFromWallet(fundingTargetRaw, true);
+    if (fundingResult.failures.length > 0) {
+      this.logger.warn(
+        {
+          phase,
+          missingQuote,
+          failures: fundingResult.failures
+        },
+        "wallet funding skipped sources that could not be quoted"
+      );
+    }
+
     if (fundingResult.txIds.length === 0) {
       this.logger.warn(
         {
           phase,
           missingQuote,
           tokenAMint: this.config.TOKEN_A_MINT,
-          tokenBMint: this.config.TOKEN_B_MINT
+          tokenBMint: this.config.TOKEN_B_MINT,
+          solReserveLamports: this.config.SOL_RESERVE_LAMPORTS
         },
         "no wallet funding route could satisfy the remaining allocation deficit"
       );

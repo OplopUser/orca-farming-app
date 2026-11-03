@@ -7,6 +7,10 @@ services:
       - "8787:8787"
     env_file:
       - .env
+    environment:
+      # The panel binds to 127.0.0.1 by default; inside the container it must listen on all interfaces
+      # for the published port to work. Set UI_TOKEN in .env, or publish as "127.0.0.1:8787:8787".
+      - UI_HOST=0.0.0.0
     volumes:
       - ./data:/app/data
       - ./wallet.json:/app/wallet.json:ro

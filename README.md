@@ -31,9 +31,9 @@ All bots share one hot wallet. Each bot monitors its pool independently, and eve
 - Symmetric price band around the centre price: `[centre / (1 + r), centre × (1 + r)]`
 - Drift trigger around the anchor price, plus an immediate trigger when price leaves the actual (tick-snapped) on-chain range
 - Anti-whipsaw filter: drift must persist for `DRIFT_CONFIRM_POLLS` consecutive polls
-- Heuristic cost/benefit gate (`REBALANCE_MIN_BENEFIT_MULTIPLE`) that skips drift rebalances that probably cost more than they earn
+- Heuristic cost/benefit gate (`REBALANCE_MIN_BENEFIT_MULTIPLE`, `0` = no minimum) that skips drift rebalances that probably cost more than they earn
 - Swaps go through the Jupiter swap API to reach the value split the new range needs, followed by "strict" pre-open swaps until the wallet is within `OPEN_BALANCE_TOLERANCE_BPS` of the open target
-- Per-bot allocation cap and a SOL reserve kept back for transaction fees
+- Per-bot allocation cap and a SOL reserve (`SOL_RESERVE_LAMPORTS`) kept back for transaction fees, which wallet-funding swaps respect too
 - **Slippage ladder:**
   - **Close:** `MAX_SLIPPAGE_BPS`, then `CLOSE_RETRY_SLIPPAGE_BPS`, then `CLOSE_FINAL_RETRY_SLIPPAGE_BPS`, with `SLIPPAGE_RETRIES_PER_TIER` attempts per tier. It only moves to a wider tier on a token-minimum-subceeded error.
   - **Open:** each tier pairs a slippage value with a deployment buffer (base, retry, final). Repeated open failures start later attempts at a wider tier.
@@ -82,6 +82,7 @@ flowchart LR
 | Module | Responsibility |
 |---|---|
 | `src/controlPanel.ts` | HTTP server: static UI and JSON API; starts the supervisor |
+| `src/panelAuth.ts` | Optional `UI_TOKEN` authentication: login form, session cookie, bearer header |
 | `src/index.ts` | Single-pool CLI (`run`, `dry-run`, `rebalance-now`) |
 | `src/config.ts` | Environment schema (zod) and defaults |
 | `src/botConfig.ts` | Applies a bot's settings on top of the global config |
@@ -101,12 +102,15 @@ flowchart LR
 
 ## Control panel
 
-`npm run ui` starts the control panel and the multi-bot supervisor. It listens on `UI_HOST:UI_PORT`, which defaults to **`0.0.0.0:8787`**, so open `http://localhost:8787`.
+`npm run ui` starts the control panel and the multi-bot supervisor. It listens on `UI_HOST:UI_PORT`, which defaults to **`127.0.0.1:8787`**, so open `http://localhost:8787`.
 
-> The panel has **no authentication**. Anyone who can reach the port can create bots, trigger rebalances and close positions. Set `UI_HOST=127.0.0.1` or keep the port behind a firewall or VPN.
+**Authentication.** The panel can create bots, trigger swaps and close positions, so treat access to it as access to the wallet.
+- Set `UI_TOKEN` to a long random secret (for example `openssl rand -hex 32`). The page then redirects to a login form; a correct token sets an `HttpOnly`, `SameSite=Strict` session cookie (an HMAC of the token, not the token itself). Scripts can send `Authorization: Bearer <token>` or `x-ui-token: <token>` instead. Every `/api` call without valid credentials gets `401`. Tokens are compared in constant time. *Sign out* in the top bar clears the cookie.
+- Without `UI_TOKEN` the panel is unauthenticated, which is only reasonable on loopback. If `UI_HOST` is anything other than a loopback address and `UI_TOKEN` is unset, the panel prints a loud warning at startup.
+- The panel speaks plain HTTP. If you reach it over a network, put it behind a VPN, an SSH tunnel or a TLS reverse proxy so the token isn't sent in clear text.
 
 From the panel you can:
-- Create a bot from a Whirlpool address, with allocation, range, drift, poll interval, and (under advanced settings) slippage tiers, deployment buffers and compounding
+- Create a bot from a Whirlpool address, with allocation, range, drift, poll interval, and (under advanced settings) slippage tiers, deployment buffers, drift confirmation, cost/benefit multiples and compounding. The form is pre-filled from the server's env config (`GET /api/bot-defaults`), and any field left blank falls back to it.
 - Start, stop, resume, rebalance now, compound now and archive each bot, and edit its main parameters
 - View active LP positions, with a range indicator, and close a position manually
 - See a wallet summary (address, token balances, total allocation, queue depth), global PnL KPIs and the position ledger
@@ -117,11 +121,16 @@ The page refreshes every 15 seconds.
 <details>
 <summary><strong>HTTP API</strong></summary>
 
+When `UI_TOKEN` is set, every `/api` route needs the session cookie or an `Authorization: Bearer <token>` / `x-ui-token` header.
+
 | Method | Path | Description |
 |---|---|---|
+| `GET` · `POST` | `/login` | Login form / submit the token (only when `UI_TOKEN` is set) |
+| `GET` | `/logout` | Clear the session cookie |
 | `GET` | `/api/status` | Wallet summary, bots and global PnL (cached for 5 s) |
+| `GET` | `/api/bot-defaults` | Strategy defaults for new bots, from the env config |
 | `GET` | `/api/bots` | List non-archived bots |
-| `POST` | `/api/bots` | Create a bot (JSON body with `whirlpoolAddress` and strategy fields) |
+| `POST` | `/api/bots` | Create a bot (JSON body with `whirlpoolAddress`; omitted strategy fields use the defaults) |
 | `PATCH` | `/api/bots/:id` | Update bot fields |
 | `DELETE` | `/api/bots/:id` | Archive a bot |
 | `POST` | `/api/bots/:id/start` · `/stop` · `/pause` · `/resume` | Lifecycle controls |
@@ -161,61 +170,67 @@ The bot signs transactions with a keypair file: a JSON array of 64 secret-key by
 
 The process loads `.env` with `override: true`, so values in `.env` take precedence over variables already set in the shell.
 
-The **Code default** column applies when a variable is unset. `.env.example` ships with tighter values for some settings. In the control panel, a new bot's strategy settings come from the create form; the env values below are used by the CLI, by a bot migrated from legacy state, and for any per-bot field that is missing from the registry.
+Defaults live in one place, `src/config.ts`, and `.env.example` lists every variable with exactly those values (a test keeps them in sync), so you only need to keep the lines you change. The strategy values below are used by the CLI and by a bot migrated from legacy state; the control panel also uses them as the pre-filled defaults for new bots and for any per-bot field missing from the registry.
 
 **Core**
 
-| Variable | Code default | `.env.example` | Description |
-|---|---|---|---|
-| `SOLANA_RPC_URL` | *(required)* | public mainnet RPC | Primary RPC URL |
-| `SOLANA_RPC_FALLBACK_URLS` | `""` | `""` | Comma-separated backup RPC URLs |
-| `BOT_WALLET_KEYPAIR_PATH` | *(required)* | `./wallet.json` | Path to the keypair JSON |
-| `ORCA_WHIRLPOOL_ADDRESS` | *(required)* | placeholder | Pool for the CLI / legacy bot. Must be non-empty even when you only use the panel. |
-| `BOT_REGISTRY_FILE` | `./data/bots.json` | same | Bot definitions and runtime state |
-| `BOT_PNL_LEDGER_FILE` | `./data/pnl-ledger.json` | same | Position PnL ledger |
-| `BOT_STATE_FILE` | `./data/state.json` | same | Single-bot state (CLI) and legacy migration source |
-| `LOG_FILE` | `./data/logs/rebalancer.log` | same | JSON log file (also feeds the UI's transaction history) |
-| `LOG_LEVEL` | `info` | `info` | `fatal` · `error` · `warn` · `info` · `debug` · `trace` |
-| `JUPITER_API_BASE_URL` | `https://lite-api.jup.ag/swap/v1` | — | Jupiter swap API base URL |
-| `JUPITER_API_KEY` | `""` | — | Sent as `x-api-key` when set |
-| `UI_HOST` | `0.0.0.0` | — | Control panel bind address |
-| `UI_PORT` | `8787` | — | Control panel port |
+| Variable | Default | Description |
+|---|---|---|
+| `SOLANA_RPC_URL` | *(required)* | Primary RPC URL |
+| `SOLANA_RPC_FALLBACK_URLS` | `""` | Comma-separated backup RPC URLs |
+| `BOT_WALLET_KEYPAIR_PATH` | *(required)* | Path to the keypair JSON |
+| `ORCA_WHIRLPOOL_ADDRESS` | *(required)* | Pool for the CLI / legacy bot. Must be non-empty even when you only use the panel. |
+| `BOT_REGISTRY_FILE` | `./data/bots.json` | Bot definitions and runtime state |
+| `BOT_PNL_LEDGER_FILE` | `./data/pnl-ledger.json` | Position PnL ledger |
+| `BOT_STATE_FILE` | `./data/state.json` | Single-bot state (CLI) and legacy migration source |
+| `LOG_FILE` | `./data/logs/rebalancer.log` | JSON log file (also feeds the UI's transaction history) |
+| `LOG_LEVEL` | `info` | `fatal` · `error` · `warn` · `info` · `debug` · `trace` |
+| `JUPITER_API_BASE_URL` | `https://lite-api.jup.ag/swap/v1` | Jupiter swap API base URL |
+| `JUPITER_API_KEY` | `""` | Sent as `x-api-key` when set |
+
+**Control panel**
+
+| Variable | Default | Description |
+|---|---|---|
+| `UI_HOST` | `127.0.0.1` | Bind address. `docker-compose.yml` sets `0.0.0.0` inside the container. |
+| `UI_PORT` | `8787` | Port |
+| `UI_TOKEN` | `""` (no auth) | Shared secret required by the page and every `/api` call when set |
 
 **Strategy**
 
-| Variable | Code default | `.env.example` | Description |
-|---|---|---|---|
-| `BOT_ALLOCATION_USDC` | `0` | `0` | USD value to deploy (CLI / legacy bot). `0` means no cap. |
-| `RANGE_PCT` | `1` | `1` | Half-width of the LP band, in % |
-| `REBALANCE_DRIFT_PCT` | `0.5` | `0.5` | Drift from the anchor that triggers a rebalance, in % |
-| `POLL_SECONDS` | `15` | `15` | Price poll interval |
-| `DRIFT_CONFIRM_POLLS` | `2` | — | Consecutive out-of-band polls required before a drift rebalance |
-| `REBALANCE_MIN_BENEFIT_MULTIPLE` | `1.5` | — | Cost/benefit gate for drift rebalances (out-of-range and manual rebalances bypass it) |
-| `SOL_RESERVE_LAMPORTS` | `50000000` | `50000000` | SOL kept back for fees when token A is SOL (0.05 SOL) |
-| `MIN_SWAP_USDC` | `10` | `1` | Minimum value delta, in quote-token units, before a rebalance swap |
-| `OPEN_BALANCE_TOLERANCE_BPS` | `25` | `10` | Allowed imbalance before opening |
+| Variable | Default | Description |
+|---|---|---|
+| `BOT_ALLOCATION_USDC` | `0` | USD value to deploy (CLI / legacy bot). `0` means no cap. Panel bots always need an explicit allocation. |
+| `RANGE_PCT` | `1` | Half-width of the LP band, in % |
+| `REBALANCE_DRIFT_PCT` | `0.5` | Drift from the anchor that triggers a rebalance, in % |
+| `POLL_SECONDS` | `15` | Price poll interval |
+| `DRIFT_CONFIRM_POLLS` | `2` | Consecutive out-of-band polls required before a drift rebalance |
+| `REBALANCE_MIN_BENEFIT_MULTIPLE` | `1.5` | Cost/benefit gate for drift rebalances: a drift rebalance goes ahead when the estimated fee benefit × this multiple covers the estimated swap + network cost. `0` disables the gate. Out-of-range and manual rebalances always bypass it. |
+| `SOL_RESERVE_LAMPORTS` | `50000000` | SOL kept back for fees (0.05 SOL): never deployed when token A is SOL, and never spent by wallet-funding swaps |
+| `MIN_SWAP_USDC` | `10` | Minimum value delta, in quote-token units, before a rebalance swap |
+| `OPEN_BALANCE_TOLERANCE_BPS` | `25` | Allowed imbalance before opening |
 
 **Slippage ladder and deployment buffers** (basis points)
 
-| Variable | Code default | `.env.example` |
-|---|---|---|
-| `MAX_SLIPPAGE_BPS` (base tier, also used for Jupiter quotes) | `25` | `10` |
-| `CLOSE_RETRY_SLIPPAGE_BPS` | `50` | `25` |
-| `CLOSE_FINAL_RETRY_SLIPPAGE_BPS` | `100` | `75` |
-| `OPEN_RETRY_SLIPPAGE_BPS` | `50` | `25` |
-| `OPEN_FINAL_RETRY_SLIPPAGE_BPS` | `100` | `75` |
-| `SLIPPAGE_RETRIES_PER_TIER` | `3` | — |
-| `OPEN_DEPLOYMENT_BUFFER_BPS` | `50` | `10` |
-| `OPEN_RETRY_DEPLOYMENT_BUFFER_BPS` | `150` | `25` |
-| `OPEN_FINAL_DEPLOYMENT_BUFFER_BPS` | `300` | `50` |
+| Variable | Default |
+|---|---|
+| `MAX_SLIPPAGE_BPS` (base tier, also used for Jupiter quotes) | `25` |
+| `CLOSE_RETRY_SLIPPAGE_BPS` | `50` |
+| `CLOSE_FINAL_RETRY_SLIPPAGE_BPS` | `100` |
+| `OPEN_RETRY_SLIPPAGE_BPS` | `50` |
+| `OPEN_FINAL_RETRY_SLIPPAGE_BPS` | `100` |
+| `SLIPPAGE_RETRIES_PER_TIER` | `3` |
+| `OPEN_DEPLOYMENT_BUFFER_BPS` | `50` |
+| `OPEN_RETRY_DEPLOYMENT_BUFFER_BPS` | `150` |
+| `OPEN_FINAL_DEPLOYMENT_BUFFER_BPS` | `300` |
 
 **Compounding**
 
-| Variable | Code default | Description |
+| Variable | Default | Description |
 |---|---|---|
 | `COMPOUND_INTERVAL_SECONDS` | `0` | Auto-compound interval; `0` disables it |
 | `COMPOUND_MIN_QUOTE_VALUE` | `0.5` | Minimum accrued fees, in quote-token units, before compounding |
-| `HARVEST_MIN_BENEFIT_MULTIPLE` | `2.0` | Fees must exceed the estimated harvest cost × this multiple (`0` disables the check) |
+| `HARVEST_MIN_BENEFIT_MULTIPLE` | `2` | Fees must exceed the estimated harvest cost × this multiple (`0` disables the check) |
 
 **Token pair** (CLI / legacy bot, and the token balances in the panel's wallet summary)
 
@@ -244,22 +259,22 @@ The CLI commands drive one pool from the env settings and keep their state in `B
 
 The repo has a multi-stage `Dockerfile` (`node:20-bookworm-slim`), a GitHub Actions workflow and a `docker-compose.yml` for a low-maintenance ARM64 host such as a Raspberry Pi.
 
-**CI** (`.github/workflows/build-and-push.yml`): every push to `main` builds a `linux/arm64` image with Buildx and QEMU and pushes it to GitHub Container Registry as `ghcr.io/<owner>/<repo>:latest` and `:<commit-sha>`.
+**CI** (`.github/workflows/build-and-push.yml`): every push to `main` runs `npm ci`, the type-check and the test suite, and only if they pass builds a `linux/arm64` image with Buildx and QEMU and pushes it to GitHub Container Registry as `ghcr.io/<owner>/<repo>:latest` and `:<commit-sha>`.
 
 **Host** (`docker-compose.yml`):
-- `orca-bot` runs the image with `.env` as its env file, mounts `./data` for state and logs, mounts `./wallet.json` read-only and publishes port `8787`. The image's `CMD` is `node dist/src/controlPanel.js`, so the container runs the control panel and multi-bot supervisor (the same as `npm run ui`).
+- `orca-bot` runs the image with `.env` as its env file, sets `UI_HOST=0.0.0.0` so the panel listens on the container's interfaces, mounts `./data` for state and logs, mounts `./wallet.json` read-only and publishes port `8787`. The image's `CMD` is `node dist/src/controlPanel.js`, so the container runs the control panel and multi-bot supervisor (the same as `npm run ui`).
 - `watchtower` polls the registry every 5 minutes and restarts the container on a new image, so a push to `main` reaches the Pi automatically. It reads `~/.docker/config.json` for registry credentials.
 
 ```bash
 # on the host, next to docker-compose.yml
 mkdir -p data
 cp /path/to/bot-keypair.json wallet.json   # dedicated hot wallet
-cp .env.example .env                       # edit; keep BOT_WALLET_KEYPAIR_PATH=./wallet.json
+cp .env.example .env                       # edit; keep BOT_WALLET_KEYPAIR_PATH=./wallet.json, set UI_TOKEN
 docker compose up -d
 docker compose logs -f orca-bot
 ```
 
-Then open `http://<host>:8787`. Leave `UI_HOST` unset (or `0.0.0.0`) inside the container so the published port reaches the panel, and restrict access at the host instead (see [Control panel](#control-panel)): for example publish `"127.0.0.1:8787:8787"` and use an SSH tunnel or VPN.
+Then open `http://<host>:8787` and sign in with `UI_TOKEN`. Because the panel listens on all interfaces inside the container, **set `UI_TOKEN` in `.env`** (the panel warns at startup if you don't). For defence in depth, also restrict the port at the host, for example publish `"127.0.0.1:8787:8787"` and use an SSH tunnel or VPN (see [Control panel](#control-panel)).
 
 Change the `image:` line in `docker-compose.yml` to point at your own registry namespace.
 
@@ -272,19 +287,24 @@ npm test          # vitest run
 npm run typecheck
 ```
 
-The suite runs offline. It uses temporary directories for the JSON stores and stub clients for the rebalancer, so it needs no RPC or wallet. It covers:
+The suite runs offline. It uses temporary directories for the JSON stores, stub clients for the rebalancer and a stubbed Jupiter/RPC layer for the Orca client, so it needs no RPC or wallet. It covers:
 
 | File | Area |
 |---|---|
 | `tests/bands.test.ts`, `drift.test.ts`, `replay.test.ts` | Band maths, drift trigger windows, price-replay triggering |
+| `tests/benefit-gate.test.ts` | Rebalance cost/benefit gate, including `REBALANCE_MIN_BENEFIT_MULTIPLE=0` |
 | `tests/recovery.test.ts` | Timeout classification helpers |
-| `tests/rebalancer-recovery.test.ts` | Rebalance state machine: resume after timeouts, position adoption, simulation-failure retries, allocation deferral, pre-open swaps; dry-run guard (no sends from rebalance, recovery or compounding) |
-| `tests/bot-registry-store.test.ts` | Registry CRUD, archiving and legacy-state migration |
+| `tests/rebalancer-recovery.test.ts` | Rebalance state machine: resume after timeouts, position adoption, simulation-failure retries, allocation deferral, pre-open swaps; dry-run guard (no sends from rebalance, recovery or compounding); cost/benefit gate in a full cycle |
+| `tests/wallet-funding.test.ts` | Wallet-funding swaps: SOL reserve, quote failures recorded and skipped, swap failures propagated |
+| `tests/bot-registry-store.test.ts` | Registry CRUD, archiving, legacy-state migration and per-bot defaults |
+| `tests/env-example.test.ts` | `.env.example` lists every variable with the code defaults |
+| `tests/panel-auth.test.ts` | `UI_TOKEN` auth: 401 without credentials, bearer/header/cookie login, loopback detection |
+| `tests/escape-html.test.ts` | HTML escaping used by the control panel |
 | `tests/pnl-math.test.ts` | PnL aggregation and USD price resolution |
 | `tests/position-pnl-service.test.ts` | Ledger open/mark/close, basis repair, stale-record reconciliation |
 | `tests/transaction-inspector.test.ts` | Token-debit extraction from transaction metadata |
 
-CI builds the image but does not run the tests; run them locally before pushing to `main`.
+CI runs the type-check and the suite before it builds the image.
 
 ## Project structure
 
@@ -313,8 +333,8 @@ Runtime data (`data/bots.json`, `data/pnl-ledger.json`, `data/logs/`) is created
 - **Real funds, mainnet only.** The Orca SDK is configured for Solana mainnet; there is no devnet or paper-trading mode beyond the single-pool `dry-run`. Bugs, bad parameters or RPC problems can lose money.
 - **Impermanent loss.** Rebalancing a tight range locks in impermanent loss on every move. Fee income may not cover IL, swap slippage and network fees. Nothing here guarantees a profit.
 - **Heuristic decisions.** The rebalance cost/benefit gate and the harvest cost estimate are rough approximations, not fee forecasts.
-- **Wallet-wide funding swaps.** If the bot's two tokens are worth less than its allocation, it may swap other assets in the wallet into the quote token through Jupiter, including SOL (the funding path does not apply `SOL_RESERVE_LAMPORTS`). Use a dedicated wallet.
-- **Unauthenticated control panel**, bound to all interfaces by default (see [Control panel](#control-panel)).
+- **Wallet-wide funding swaps.** If the bot's two tokens are worth less than its allocation, it may swap other assets in the wallet into the quote token through Jupiter, including SOL above `SOL_RESERVE_LAMPORTS`. Sources that can't be quoted are skipped and logged; a failed funding swap stops the rebalance and goes through the normal retry/pause handling. Use a dedicated wallet.
+- **Control panel access.** Authentication is a single shared token (`UI_TOKEN`) over plain HTTP, and it is off unless you set it. Keep the panel on loopback, or behind a VPN / TLS proxy with a token set (see [Control panel](#control-panel)).
 - **Hot key on disk.** The keypair is a plaintext file readable by the process.
 - **Approximate PnL.** Values come from simulated close quotes and best-effort USD pricing. Treat them as estimates, not accounting records.
 - **External dependencies.** Correct behaviour depends on the Orca SDK, the Jupiter swap API and your RPC provider. Changes or outages upstream can pause bots.

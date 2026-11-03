@@ -116,7 +116,8 @@ function createHarness(initialState: BotState, overrides: Record<string, unknown
     fundQuoteTokenFromWallet: vi.fn(async () => ({
       fundedQuoteAmount: 0n,
       txIds: [],
-      route: null
+      route: null,
+      failures: []
     })),
     assessSwapToTarget: vi.fn(() => ({
       direction: "none",
@@ -967,5 +968,49 @@ describe("dry-run guard", () => {
       DryRunSendBlockedError
     );
     expect(send).not.toHaveBeenCalled();
+  });
+});
+
+describe("rebalance cost/benefit gate", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // Price 99.4 vs anchor 100 is a confirmed 0.6% drift (DRIFT_CONFIRM_POLLS=2). With a 100 USDC
+  // allocation the heuristic expects ~0.30 of fees against ~1.005 of swap + network cost.
+  function createDriftHarness(minBenefitMultiple: number) {
+    const harness = createHarness(
+      createState({ driftStatus: "waiting", consecutiveDriftPolls: 1 })
+    );
+    const config = (harness.service as any).config;
+    config.BOT_ALLOCATION_USDC = 100;
+    config.REBALANCE_MIN_BENEFIT_MULTIPLE = minBenefitMultiple;
+    return harness;
+  }
+
+  function loggedSkip(harness: ReturnType<typeof createHarness>) {
+    return harness.logger.info.mock.calls.some(
+      (call: unknown[]) => call[1] === "rebalance skipped — cost exceeds expected fee benefit"
+    );
+  }
+
+  it("treats REBALANCE_MIN_BENEFIT_MULTIPLE=0 as no minimum and rebalances on confirmed drift", async () => {
+    const harness = createDriftHarness(0);
+
+    await harness.service.runCycle("dry-run");
+
+    expect(loggedSkip(harness)).toBe(false);
+    expect(harness.orcaClient.closePosition).toHaveBeenCalled();
+    expect(harness.getState().latestAction).toBe("dry-run rebalance complete");
+  });
+
+  it("still skips a drift rebalance whose estimated cost outweighs the benefit when a multiple is set", async () => {
+    const harness = createDriftHarness(1.5);
+
+    await harness.service.runCycle("dry-run");
+
+    expect(loggedSkip(harness)).toBe(true);
+    expect(harness.orcaClient.closePosition).not.toHaveBeenCalled();
+    expect(harness.getState().driftStatus).toBe("waiting");
   });
 });

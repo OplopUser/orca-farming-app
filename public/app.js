@@ -1,3 +1,5 @@
+import { escapeHtml } from "./escape.js";
+
 const walletAddress = document.getElementById("walletAddress");
 const enabledBots = document.getElementById("enabledBots");
 const monitoringBots = document.getElementById("monitoringBots");
@@ -29,34 +31,13 @@ const typeFilter = document.getElementById("typeFilter");
 const statusFilter = document.getElementById("statusFilter");
 const searchFilter = document.getElementById("searchFilter");
 const createBotForm = document.getElementById("createBotForm");
-const platformInput = document.getElementById("platformInput");
+const signOutLink = document.getElementById("signOutLink");
 const activeLpGrid = document.getElementById("activeLpGrid");
 
 let latestBots = [];
 let latestTransactions = [];
 let latestPnlPositions = [];
 let previousBotIds = [];
-
-function applyPlatformVisibility(platform) {
-  const meteoraEls = document.querySelectorAll(".meteora-only");
-  const orcaEls = document.querySelectorAll(".orca-only");
-  const isMeteora = platform === "meteora";
-  for (const el of meteoraEls) {
-    el.hidden = !isMeteora;
-    const input = el.querySelector("input, select");
-    if (input) input.required = isMeteora;
-  }
-  for (const el of orcaEls) {
-    el.hidden = isMeteora;
-    const input = el.querySelector("input, select");
-    if (input) input.required = !isMeteora;
-  }
-}
-
-if (platformInput) {
-  platformInput.addEventListener("change", () => applyPlatformVisibility(platformInput.value));
-  applyPlatformVisibility(platformInput.value);
-}
 
 async function request(path, options = {}) {
   const response = await fetch(path, {
@@ -65,6 +46,12 @@ async function request(path, options = {}) {
     },
     ...options
   });
+
+  if (response.status === 401) {
+    // UI_TOKEN is set and the session cookie is missing or stale: go back to the login form.
+    window.location.assign("/login");
+    throw new Error("Not signed in");
+  }
 
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
@@ -210,7 +197,7 @@ function renderPnl(summary) {
 function renderTransactionFilter(bots) {
   const previous = transactionFilter.value;
   transactionFilter.innerHTML = `<option value="">All bots</option>${bots
-    .map((bot) => `<option value="${bot.id}">${bot.name}</option>`)
+    .map((bot) => `<option value="${escapeHtml(bot.id)}">${escapeHtml(bot.name)}</option>`)
     .join("")}`;
   transactionFilter.value = bots.some((bot) => bot.id === previous) ? previous : "";
 }
@@ -218,38 +205,36 @@ function renderTransactionFilter(bots) {
 function renderSelectOptions(select, values, allLabel) {
   const previous = select.value;
   select.innerHTML = `<option value="">${allLabel}</option>${values
-    .map((value) => `<option value="${value}">${value}</option>`)
+    .map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`)
     .join("")}`;
   select.value = values.includes(previous) ? previous : "";
 }
 
 function botCardHtml(bot) {
-  const platformLabel = bot.platform === "meteora" ? "Meteora DLMM" : "Orca Whirlpool";
-  const platformClass = bot.platform === "meteora" ? "platform-meteora" : "platform-orca";
   return `
-    <article class="bot-card" data-bot-id="${bot.id}">
+    <article class="bot-card" data-bot-id="${escapeHtml(bot.id)}">
       <div class="bot-head">
         <div>
-          <p class="eyebrow">${bot.tokenPair} &middot; <span class="platform-badge ${platformClass}">${platformLabel}</span></p>
-          <h3>${bot.name}</h3>
+          <p class="eyebrow">${escapeHtml(bot.tokenPair)}</p>
+          <h3>${escapeHtml(bot.name)}</h3>
         </div>
-        <span class="badge ${getBadgeClass(bot.runState)}">${bot.runState}</span>
+        <span class="badge ${getBadgeClass(bot.runState)}">${escapeHtml(bot.runState)}</span>
       </div>
       <dl class="bot-grid">
-        <div><dt>Pool</dt><dd data-field="pool">${formatValue(bot.whirlpoolAddress)}</dd></div>
-        <div><dt>Allocation</dt><dd data-field="allocation">${formatValue(bot.allocationUsdc)} USDC</dd></div>
-        <div><dt>Observed</dt><dd data-field="observed">${formatValue(bot.lastObservedPrice)}</dd></div>
-        <div><dt>Anchor</dt><dd data-field="anchor">${formatValue(bot.lastCenterPrice)}</dd></div>
-        <div><dt>Trigger Window</dt><dd data-field="triggerWindow">${formatRange(bot.driftTriggerLower, bot.driftTriggerUpper)}</dd></div>
-        <div><dt>Trigger State</dt><dd data-field="triggerState">${formatValue(bot.triggerState)}</dd></div>
-        <div><dt>Position</dt><dd data-field="position">${formatValue(bot.activePositionMint)}</dd></div>
-        <div><dt>Last Action</dt><dd data-field="lastAction">${formatValue(bot.latestAction)}</dd></div>
+        <div><dt>Pool</dt><dd data-field="pool">${escapeHtml(formatValue(bot.whirlpoolAddress))}</dd></div>
+        <div><dt>Allocation</dt><dd data-field="allocation">${escapeHtml(formatValue(bot.allocationUsdc))} USDC</dd></div>
+        <div><dt>Observed</dt><dd data-field="observed">${escapeHtml(formatValue(bot.lastObservedPrice))}</dd></div>
+        <div><dt>Anchor</dt><dd data-field="anchor">${escapeHtml(formatValue(bot.lastCenterPrice))}</dd></div>
+        <div><dt>Trigger Window</dt><dd data-field="triggerWindow">${escapeHtml(formatRange(bot.driftTriggerLower, bot.driftTriggerUpper))}</dd></div>
+        <div><dt>Trigger State</dt><dd data-field="triggerState">${escapeHtml(formatValue(bot.triggerState))}</dd></div>
+        <div><dt>Position</dt><dd data-field="position">${escapeHtml(formatValue(bot.activePositionMint))}</dd></div>
+        <div><dt>Last Action</dt><dd data-field="lastAction">${escapeHtml(formatValue(bot.latestAction))}</dd></div>
         <div><dt>Open PnL</dt><dd data-field="openPnl" class="${pnlClass(bot.pnl?.openNetPnlUsdc)}">${formatUsd(bot.pnl?.openNetPnlUsdc)}</dd></div>
         <div><dt>Realized PnL</dt><dd data-field="realizedPnl" class="${pnlClass(bot.pnl?.realizedNetPnlUsdc)}">${formatUsd(bot.pnl?.realizedNetPnlUsdc)}</dd></div>
         <div><dt>Total PnL</dt><dd data-field="totalPnl" class="${pnlClass(bot.pnl?.totalNetPnlUsdc)}">${formatUsd(bot.pnl?.totalNetPnlUsdc)}</dd></div>
         <div><dt>Fees Earned</dt><dd data-field="feesEarned" class="${pnlClass(bot.pnl?.feesEarnedUsdc)}">${formatUsd(bot.pnl?.feesEarnedUsdc)}</dd></div>
-        <div><dt>Pause Reason</dt><dd data-field="pauseReason">${formatValue(bot.pauseReason)}</dd></div>
-        <div><dt>Recovery</dt><dd data-field="recovery">${formatRecovery(bot)}</dd></div>
+        <div><dt>Pause Reason</dt><dd data-field="pauseReason">${escapeHtml(formatValue(bot.pauseReason))}</dd></div>
+        <div><dt>Recovery</dt><dd data-field="recovery">${escapeHtml(formatRecovery(bot))}</dd></div>
       </dl>
       <div class="card-actions">
         <button class="play" data-action="start">Start</button>
@@ -259,15 +244,15 @@ function botCardHtml(bot) {
         <button class="secondary" data-action="resume">Resume</button>
         <button class="secondary" data-action="archive">Archive</button>
       </div>
-      <form class="edit-form" data-edit-form="${bot.id}">
-        <label><span>Name</span><input name="name" value="${bot.name}" /></label>
-        <label><span>Allocation</span><input name="allocationUsdc" type="number" min="1" step="0.01" value="${bot.allocationUsdc}" /></label>
-        <label><span>Range %</span><input name="rangePct" type="number" min="0.01" step="0.01" value="${bot.rangePct}" /></label>
-        <label><span>Drift %</span><input name="rebalanceDriftPct" type="number" min="0.01" step="0.01" value="${bot.rebalanceDriftPct}" /></label>
-        <label><span>Poll Seconds</span><input name="pollSeconds" type="number" min="5" step="1" value="${bot.pollSeconds}" /></label>
-        <label><span>Max Slippage</span><input name="maxSlippageBps" type="number" min="1" step="1" value="${bot.maxSlippageBps ?? 100}" /></label>
-        <label><span>Compound Interval (s)</span><input name="compoundIntervalSeconds" type="number" min="0" step="1" value="${bot.compoundIntervalSeconds ?? 0}" /></label>
-        <label><span>Compound Min Value</span><input name="compoundMinQuoteValue" type="number" min="0" step="0.01" value="${bot.compoundMinQuoteValue ?? 0.5}" /></label>
+      <form class="edit-form" data-edit-form="${escapeHtml(bot.id)}">
+        <label><span>Name</span><input name="name" value="${escapeHtml(bot.name)}" /></label>
+        <label><span>Allocation</span><input name="allocationUsdc" type="number" min="1" step="0.01" value="${escapeHtml(bot.allocationUsdc)}" /></label>
+        <label><span>Range %</span><input name="rangePct" type="number" min="0.01" step="0.01" value="${escapeHtml(bot.rangePct)}" /></label>
+        <label><span>Drift %</span><input name="rebalanceDriftPct" type="number" min="0.01" step="0.01" value="${escapeHtml(bot.rebalanceDriftPct)}" /></label>
+        <label><span>Poll Seconds</span><input name="pollSeconds" type="number" min="5" step="1" value="${escapeHtml(bot.pollSeconds)}" /></label>
+        <label><span>Max Slippage</span><input name="maxSlippageBps" type="number" min="1" step="1" value="${escapeHtml(bot.maxSlippageBps)}" /></label>
+        <label><span>Compound Interval (s)</span><input name="compoundIntervalSeconds" type="number" min="0" step="1" value="${escapeHtml(bot.compoundIntervalSeconds)}" /></label>
+        <label><span>Compound Min Value</span><input name="compoundMinQuoteValue" type="number" min="0" step="0.01" value="${escapeHtml(bot.compoundMinQuoteValue)}" /></label>
         <div class="form-actions"><button class="secondary" type="submit">Save Changes</button></div>
       </form>
     </article>
@@ -324,7 +309,7 @@ function renderBots(bots) {
 
   if (idsMatch) {
     for (const bot of bots) {
-      const card = botsGrid.querySelector(`[data-bot-id="${bot.id}"]`);
+      const card = botsGrid.querySelector(`[data-bot-id="${CSS.escape(String(bot.id))}"]`);
       if (card) {
         updateBotCard(card, bot);
       }
@@ -347,16 +332,16 @@ function renderTransactions(events) {
 
   transactionsBody.innerHTML = events
     .map((event) => {
-      const txId = event.txId ? `<code title="${event.txId}">${event.txId}</code>` : "-";
+      const txId = event.txId ? `<code title="${escapeHtml(event.txId)}">${escapeHtml(event.txId)}</code>` : "-";
       return `
         <tr>
-          <td>${formatValue(event.time)}</td>
-          <td>${formatValue(event.botName ?? event.botId)}</td>
-          <td>${formatValue(event.type)}</td>
-          <td>${formatValue(event.status)}</td>
+          <td>${escapeHtml(formatValue(event.time))}</td>
+          <td>${escapeHtml(formatValue(event.botName ?? event.botId))}</td>
+          <td>${escapeHtml(formatValue(event.type))}</td>
+          <td>${escapeHtml(formatValue(event.status))}</td>
           <td>${txId}</td>
-          <td>${formatValue(event.fees)}</td>
-          <td>${formatValue(event.summary)}</td>
+          <td>${escapeHtml(formatValue(event.fees))}</td>
+          <td>${escapeHtml(formatValue(event.summary))}</td>
         </tr>
       `;
     })
@@ -498,11 +483,11 @@ function renderActiveLpPositions(records) {
           : null;
 
       return `
-        <article class="lp-card" data-bot-id="${bot.id}">
+        <article class="lp-card" data-bot-id="${escapeHtml(bot.id)}">
           <div class="lp-head">
             <div>
-              <p class="eyebrow">${bot.tokenPair}</p>
-              <h3>${bot.name}</h3>
+              <p class="eyebrow">${escapeHtml(bot.tokenPair)}</p>
+              <h3>${escapeHtml(bot.name)}</h3>
             </div>
             <span class="${badgeClass}">${badgeText}</span>
           </div>
@@ -524,7 +509,7 @@ function renderActiveLpPositions(records) {
           <dl class="lp-details">
             <div>
               <dt>Position</dt>
-              <dd><code title="${bot.activePositionMint}">${bot.activePositionMint}</code></dd>
+              <dd><code title="${escapeHtml(bot.activePositionMint)}">${escapeHtml(bot.activePositionMint)}</code></dd>
             </div>
             <div>
               <dt>Entry Capital</dt>
@@ -580,11 +565,11 @@ function renderActiveLpPositions(records) {
             </div>
             <div>
               <dt>Entry Token A</dt>
-              <dd>${ledgerRecord?.entryTokenA ?? "-"}</dd>
+              <dd>${escapeHtml(ledgerRecord?.entryTokenA ?? "-")}</dd>
             </div>
             <div>
               <dt>Entry Token B</dt>
-              <dd>${ledgerRecord?.entryTokenB ?? "-"}</dd>
+              <dd>${escapeHtml(ledgerRecord?.entryTokenB ?? "-")}</dd>
             </div>
             ${ledgerRecord ? "" : `
             <div>
@@ -617,12 +602,12 @@ function renderPnlPositions(records) {
   pnlPositionsBody.innerHTML = records
     .map((record) => `
       <tr>
-        <td>${formatValue(record.botName)}</td>
-        <td>${formatValue(record.tokenPair)}</td>
-        <td>${formatValue(record.status)}</td>
-        <td><code title="${record.positionMint}">${record.positionMint}</code></td>
-        <td>${formatValue(record.openedAt)}</td>
-        <td>${formatValue(record.closedAt)}</td>
+        <td>${escapeHtml(formatValue(record.botName))}</td>
+        <td>${escapeHtml(formatValue(record.tokenPair))}</td>
+        <td>${escapeHtml(formatValue(record.status))}</td>
+        <td><code title="${escapeHtml(record.positionMint)}">${escapeHtml(record.positionMint)}</code></td>
+        <td>${escapeHtml(formatValue(record.openedAt))}</td>
+        <td>${escapeHtml(formatValue(record.closedAt))}</td>
         <td>${formatUsd(record.entryCapitalUsdc)}</td>
         <td>${formatUsd(record.status === "open" ? record.latestGrossValueUsdc : record.exitGrossValueUsdc)}</td>
         <td class="${pnlClass(record.status === "open" ? record.latestNetPnlUsdc : record.realizedNetPnlUsdc)}">${formatUsd(record.status === "open" ? record.latestNetPnlUsdc : record.realizedNetPnlUsdc)}</td>
@@ -688,27 +673,46 @@ async function refreshTransactions() {
 
 async function refreshStatus() {
   const payload = await request("/api/status");
+  if (signOutLink) {
+    signOutLink.hidden = !payload.panel?.authEnabled;
+  }
   renderWallet(payload.wallet);
   renderPnl(payload.pnl);
   renderBots(payload.bots ?? []);
   await Promise.all([refreshPnlPositions(), refreshTransactions()]);
 }
 
+// Pre-fill the create form from the server's config defaults (src/config.ts is the single source of truth).
+// Setting defaultValue (not value) means createBotForm.reset() restores these defaults too.
+async function loadBotDefaults() {
+  const payload = await request("/api/bot-defaults");
+  const defaults = payload?.defaults ?? {};
+  for (const [name, value] of Object.entries(defaults)) {
+    const input = createBotForm.elements.namedItem(name);
+    if (!(input instanceof HTMLInputElement)) {
+      continue;
+    }
+    // An allocation of 0 means "no cap" for the CLI; a panel bot needs an explicit amount.
+    if (name === "allocationUsdc" && !(Number(value) > 0)) {
+      continue;
+    }
+    input.defaultValue = String(value);
+  }
+}
+
 createBotForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const formData = new FormData(createBotForm);
-  const raw = Object.fromEntries(formData.entries());
-  const stringFields = new Set(["name", "whirlpoolAddress", "platform", "meteoraStrategyType"]);
+  const stringFields = new Set(["name", "whirlpoolAddress"]);
   const payload = {};
-  for (const [key, value] of Object.entries(raw)) {
-    payload[key] = stringFields.has(key) ? value : Number(value);
-  }
-
-  // For Meteora bots, derive rangePct from the asymmetric ranges
-  if (payload.platform === "meteora") {
-    const below = payload.rangePctBelow ?? 1;
-    const above = payload.rangePctAbove ?? 1;
-    payload.rangePct = Math.max(below, above);
+  for (const [key, value] of formData.entries()) {
+    const text = String(value).trim();
+    if (stringFields.has(key)) {
+      payload[key] = text;
+    } else if (text !== "") {
+      // Blank numeric fields are omitted so the server applies its config default.
+      payload[key] = Number(text);
+    }
   }
 
   try {
@@ -717,7 +721,6 @@ createBotForm.addEventListener("submit", async (event) => {
       body: JSON.stringify(payload)
     });
     createBotForm.reset();
-    applyPlatformVisibility(platformInput?.value ?? "orca");
     await refreshStatus();
   } catch (error) {
     console.error(error);
@@ -748,13 +751,13 @@ botsGrid.addEventListener("click", async (event) => {
 
   try {
     if (action === "archive") {
-      await request(`/api/bots/${botId}`, { method: "DELETE" });
+      await request(`/api/bots/${encodeURIComponent(botId)}`, { method: "DELETE" });
     } else if (action === "rebalance") {
-      await request(`/api/bots/${botId}/rebalance`, { method: "POST" });
+      await request(`/api/bots/${encodeURIComponent(botId)}/rebalance`, { method: "POST" });
     } else if (action === "compound") {
-      await request(`/api/bots/${botId}/compound`, { method: "POST" });
+      await request(`/api/bots/${encodeURIComponent(botId)}/compound`, { method: "POST" });
     } else {
-      await request(`/api/bots/${botId}/${action}`, { method: "POST" });
+      await request(`/api/bots/${encodeURIComponent(botId)}/${action}`, { method: "POST" });
     }
     await refreshStatus();
   } catch (error) {
@@ -784,7 +787,7 @@ botsGrid.addEventListener("submit", async (event) => {
   }
 
   try {
-    await request(`/api/bots/${botId}`, {
+    await request(`/api/bots/${encodeURIComponent(botId)}`, {
       method: "PATCH",
       body: JSON.stringify(payload)
     });
@@ -821,7 +824,7 @@ activeLpGrid.addEventListener("click", async (event) => {
     target.textContent = "Compounding...";
 
     try {
-      await request(`/api/bots/${botId}/compound`, { method: "POST" });
+      await request(`/api/bots/${encodeURIComponent(botId)}/compound`, { method: "POST" });
       await refreshStatus();
     } catch (error) {
       console.error(error);
@@ -842,7 +845,7 @@ activeLpGrid.addEventListener("click", async (event) => {
     target.textContent = "Closing...";
 
     try {
-      const result = await request(`/api/bots/${botId}/close-position`, { method: "POST" });
+      const result = await request(`/api/bots/${encodeURIComponent(botId)}/close-position`, { method: "POST" });
       alert(`Position closed. Tx: ${result?.txId ?? "unknown"}`);
       await refreshStatus();
     } catch (error) {
@@ -865,6 +868,7 @@ searchFilter.addEventListener("input", () => {
   searchTimeout = setTimeout(() => renderTransactions(applyTransactionFilters()), 300);
 });
 
+loadBotDefaults().catch((error) => console.error(error));
 refreshStatus().catch((error) => {
   console.error(error);
 });

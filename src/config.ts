@@ -5,7 +5,7 @@ import { normalizeRpcUrls } from "./infra/rpcFailover.js";
 
 dotenv.config({ override: true });
 
-const envSchema = z.object({
+export const envSchema = z.object({
   SOLANA_RPC_URL: z.url(),
   SOLANA_RPC_FALLBACK_URLS: z.string().default(""),
   BOT_WALLET_KEYPAIR_PATH: z.string().min(1),

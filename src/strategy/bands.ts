@@ -64,3 +64,20 @@ export function toBaseUnits(amount: number, decimals: number): bigint {
 export function fromBaseUnits(amount: bigint, decimals: number): number {
   return Number(amount) / 10 ** decimals;
 }
+
+/**
+ * Cost/benefit gate for drift rebalances (REBALANCE_MIN_BENEFIT_MULTIPLE).
+ * A multiple of 0 (or less) means "no minimum": the gate always passes. Otherwise the rebalance goes
+ * ahead when expectedFeeQuote × multiple covers the estimated swap + network cost.
+ */
+export function passesRebalanceBenefitGate(
+  expectedFeeQuote: number,
+  estimatedCostQuote: number,
+  minBenefitMultiple: number
+): boolean {
+  if (!(minBenefitMultiple > 0)) {
+    return true;
+  }
+
+  return expectedFeeQuote * minBenefitMultiple >= estimatedCostQuote;
+}

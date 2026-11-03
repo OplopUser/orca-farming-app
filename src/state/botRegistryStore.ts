@@ -56,13 +56,16 @@ function createDefaultRegistry(): BotRegistry {
   };
 }
 
-function createDefinitionFromConfig(config: AppConfig, botId: string, now: string): BotDefinition {
+/** Strategy fields a bot can be created with; everything except identity and pool comes from config by default. */
+export type BotStrategyDefaults = Omit<CreateBotInput, "name" | "whirlpoolAddress">;
+
+/**
+ * Per-bot strategy defaults. src/config.ts is the single source of truth: the CLI uses the env values
+ * directly, and the control panel serves these (GET /api/bot-defaults) to pre-fill its create form and
+ * fills any field a create request leaves out.
+ */
+export function botDefaultsFromConfig(config: AppConfig): BotStrategyDefaults {
   return {
-    id: botId,
-    name: `${config.TOKEN_A_SYMBOL}/${config.TOKEN_B_SYMBOL} Legacy Bot`,
-    enabled: true,
-    archived: false,
-    whirlpoolAddress: config.ORCA_WHIRLPOOL_ADDRESS,
     allocationUsdc: Number.isFinite(config.BOT_ALLOCATION_USDC) ? config.BOT_ALLOCATION_USDC : 0,
     rangePct: config.RANGE_PCT,
     rebalanceDriftPct: config.REBALANCE_DRIFT_PCT,
@@ -82,7 +85,39 @@ function createDefinitionFromConfig(config: AppConfig, botId: string, now: strin
     compoundMinQuoteValue: config.COMPOUND_MIN_QUOTE_VALUE,
     driftConfirmPolls: config.DRIFT_CONFIRM_POLLS,
     rebalanceMinBenefitMultiple: config.REBALANCE_MIN_BENEFIT_MULTIPLE,
-    harvestMinBenefitMultiple: config.HARVEST_MIN_BENEFIT_MULTIPLE,
+    harvestMinBenefitMultiple: config.HARVEST_MIN_BENEFIT_MULTIPLE
+  };
+}
+
+/** Fills every strategy field missing from (or not a finite number in) a create request from config. */
+export function withBotDefaults(
+  config: AppConfig,
+  input: Partial<CreateBotInput> & Pick<CreateBotInput, "whirlpoolAddress">
+): CreateBotInput {
+  const defaults = botDefaultsFromConfig(config);
+  const merged = { ...defaults } as BotStrategyDefaults;
+  for (const key of Object.keys(defaults) as Array<keyof BotStrategyDefaults>) {
+    const value = input[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      merged[key] = value;
+    }
+  }
+
+  return {
+    ...merged,
+    name: typeof input.name === "string" ? input.name : "",
+    whirlpoolAddress: input.whirlpoolAddress
+  };
+}
+
+function createDefinitionFromConfig(config: AppConfig, botId: string, now: string): BotDefinition {
+  return {
+    id: botId,
+    name: `${config.TOKEN_A_SYMBOL}/${config.TOKEN_B_SYMBOL} Legacy Bot`,
+    enabled: true,
+    archived: false,
+    whirlpoolAddress: config.ORCA_WHIRLPOOL_ADDRESS,
+    ...botDefaultsFromConfig(config),
     tokenAMint: config.TOKEN_A_MINT,
     tokenASymbol: config.TOKEN_A_SYMBOL,
     tokenADecimals: config.TOKEN_A_DECIMALS,
